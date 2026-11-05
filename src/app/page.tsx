@@ -127,6 +127,33 @@ export default function BotDashboardPage() {
           }
           return updated;
         });
+
+        // Pre-populate queue from Justapedia API for any bot that is low on articles
+        AVAILABLE_BOTS.forEach((b) => {
+          fetch(`/api/bot/replenish-queue?botId=${encodeURIComponent(b.id)}&limit=50`)
+            .then((r) => r.json())
+            .then((repData) => {
+              if (repData.success && Array.isArray(repData.articles) && repData.articles.length > 0) {
+                const fresh = repData.articles.filter((t: string) => !fullDict[t.trim().replace(/_/g, " ").toLowerCase()]);
+                if (fresh.length > 0) {
+                  setBotStates((prev) => {
+                    const st = prev[b.id];
+                    if (!st) return prev;
+                    const existingSet = new Set(st.articleQueue.map((t) => t.trim().toLowerCase()));
+                    const newArticles = fresh.filter((t: string) => !existingSet.has(t.trim().toLowerCase()));
+                    return {
+                      ...prev,
+                      [b.id]: {
+                        ...st,
+                        articleQueue: [...st.articleQueue, ...newArticles],
+                      },
+                    };
+                  });
+                }
+              }
+            })
+            .catch(() => {});
+        });
       })
       .catch(() => {
         setResolvedArticles(localDict);
@@ -162,6 +189,60 @@ export default function BotDashboardPage() {
   // References to running intervals
   const runIntervals = useRef<Record<string, NodeJS.Timeout | null>>({});
   const cooldownIntervals = useRef<Record<string, NodeJS.Timeout | null>>({});
+  const isReplenishingRef = useRef<Record<string, boolean>>({});
+
+  // Auto-replenish bot queue from Justapedia API to maintain continuous editing
+  const replenishQueue = async (botId: string, announce: boolean = true): Promise<string[]> => {
+    if (isReplenishingRef.current[botId]) return [];
+    isReplenishingRef.current[botId] = true;
+
+    try {
+      const res = await fetch(`/api/bot/replenish-queue?botId=${encodeURIComponent(botId)}&limit=50`);
+      const data = await res.json();
+
+      if (data.success && Array.isArray(data.articles) && data.articles.length > 0) {
+        // Filter out any articles already resolved
+        const unhandled = data.articles.filter((title: string) => {
+          const norm = title.trim().replace(/_/g, " ").toLowerCase();
+          return !resolvedArticles[norm];
+        });
+
+        if (unhandled.length > 0) {
+          setBotStates((prev) => {
+            const current = prev[botId];
+            if (!current) return prev;
+            const existingSet = new Set(current.articleQueue.map((t: string) => t.trim().toLowerCase()));
+            const newToAdd = unhandled.filter((t: string) => !existingSet.has(t.trim().toLowerCase()));
+            const updatedQueue = [...current.articleQueue, ...newToAdd];
+
+            return {
+              ...prev,
+              [botId]: {
+                ...current,
+                articleQueue: updatedQueue,
+              },
+            };
+          });
+
+          if (announce) {
+            addLog(botId, {
+              timestamp: new Date().toLocaleTimeString(),
+              level: "cycle",
+              message: `[QUEUE REPLENISHED] Discovered and queued ${unhandled.length} fresh unhandled articles from Justapedia (${data.sourcesUsed || "API"}).`,
+            });
+          }
+
+          return unhandled;
+        }
+      }
+      return [];
+    } catch (err) {
+      console.error("Queue replenish error:", err);
+      return [];
+    } finally {
+      isReplenishingRef.current[botId] = false;
+    }
+  };
 
   const handleLoadCategoryArticles = async (botId: string, categoryName: string) => {
     setIsLoadingCategory(true);
@@ -383,7 +464,7 @@ export default function BotDashboardPage() {
     addLog(botId, {
       timestamp: new Date().toLocaleTimeString(),
       level: "info",
-      message: `Starting ${botDef.name}: Executing bot's genuine features. Target pacing: up to 100 edits/min. Mode: ${useSandbox ? "SANDBOX (Safe Testing)" : "LIVE PAGE PUBLISH"}.`,
+      message: `Starting ${botDef.name}: Executing bot's genuine features. Target pacing: up to 100 edits/min. Mode: ${useSandbox ? "SANDBOX (Safe Personal Draft)" : "LIVE PAGE PUBLISH"}.`,
     });
 
     if (user) {
@@ -394,10 +475,28 @@ export default function BotDashboardPage() {
       });
     }
 
-    // High-speed pace: 1 check/edit every ~600ms = 100 operations/minute
-    runIntervals.current[botId] = setInterval(() => {
-      processNextEdit(botId);
-    }, 600);
+    const currentQueue = botStates[botId]?.articleQueue || [];
+    if (currentQueue.length === 0) {
+      addLog(botId, {
+        timestamp: new Date().toLocaleTimeString(),
+        level: "cycle",
+        message: `[AUTO-DISCOVERY] Queue empty. Automatically crawling Justapedia API for next batch of unhandled articles...`,
+      });
+
+      replenishQueue(botId, true).then(() => {
+        if (!runIntervals.current[botId]) {
+          runIntervals.current[botId] = setInterval(() => {
+            processNextEdit(botId);
+          }, 600);
+        }
+      });
+    } else {
+      if (!runIntervals.current[botId]) {
+        runIntervals.current[botId] = setInterval(() => {
+          processNextEdit(botId);
+        }, 600);
+      }
+    }
   };
 
   // Cooldown countdown handler (60 seconds pause)
@@ -475,16 +574,21 @@ export default function BotDashboardPage() {
 
       const queue = [...currentState.articleQueue];
 
-      // Auto-stop bot when queue is completely processed
+      // Proactively replenish queue in background when running low (<= 5 articles remaining)
+      if (queue.length <= 5 && !isReplenishingRef.current[botId]) {
+        replenishQueue(botId, false);
+      }
+
+      // If queue is completely depleted: DO NOT STOP! Auto-replenish from Justapedia API to maintain continuous cycle
       if (queue.length === 0) {
-        setTimeout(() => {
-          stopBot(botId);
+        if (!isReplenishingRef.current[botId]) {
           addLog(botId, {
             timestamp: new Date().toLocaleTimeString(),
-            level: "success",
-            message: `[QUEUE COMPLETE] All articles in the queue have been fully resolved. Bot automatically stopped to prevent redundant or duplicate edits.`,
+            level: "cycle",
+            message: `[CONTINUOUS CYCLE] Queue empty. Automatically fetching next batch of unhandled articles from Justapedia API...`,
           });
-        }, 50);
+          replenishQueue(botId, true);
+        }
         return prev;
       }
 
@@ -1263,35 +1367,45 @@ export default function BotDashboardPage() {
                           <CheckCheck className="w-3.5 h-3.5 text-emerald-400" />
                           <span>Queue Status</span>
                         </span>
-                        <button
-                          onClick={() => {
-                            const defaultArticles = [
-                              "Albert Einstein", "Ada Lovelace", "Alan Turing", "Marie Curie", "Nikola Tesla",
-                              "Isaac Newton", "Galileo Galilei", "Johannes Kepler", "Charles Darwin", "Carl Sagan",
-                              "Stephen Hawking", "Richard Feynman", "Hypatia", "Rosalind Franklin", "Grace Hopper",
-                              "Katherine Johnson", "Chien-Shiung Wu", "Lise Meitner", "Emmy Noether", "Barbara McClintock"
-                            ];
-                            const unhandled = defaultArticles.filter(
-                              (t) => !resolvedArticles[t.trim().replace(/_/g, " ").toLowerCase()]
-                            );
-                            setBotStates((prev) => ({
-                              ...prev,
-                              [bot.id]: {
-                                ...prev[bot.id],
-                                articleQueue: unhandled,
-                              },
-                            }));
-                            addLog(bot.id, {
-                              timestamp: new Date().toLocaleTimeString(),
-                              level: "info",
-                              message: `Reloaded default queue: ${unhandled.length} unhandled articles (${defaultArticles.length - unhandled.length} already resolved were excluded).`,
-                            });
-                          }}
-                          className="text-[10px] text-indigo-400 hover:underline"
-                          title="Reload default unhandled articles"
-                        >
-                          Reset Queue
-                        </button>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => replenishQueue(bot.id, true)}
+                            className="text-[10px] text-emerald-400 hover:text-emerald-300 font-medium transition flex items-center gap-1"
+                            title="Auto-discover and append 50 fresh unhandled articles from Justapedia API"
+                          >
+                            + Refill (+50)
+                          </button>
+                          <span className="text-slate-600">•</span>
+                          <button
+                            onClick={() => {
+                              const defaultArticles = [
+                                "Albert Einstein", "Ada Lovelace", "Alan Turing", "Marie Curie", "Nikola Tesla",
+                                "Isaac Newton", "Galileo Galilei", "Johannes Kepler", "Charles Darwin", "Carl Sagan",
+                                "Stephen Hawking", "Richard Feynman", "Hypatia", "Rosalind Franklin", "Grace Hopper",
+                                "Katherine Johnson", "Chien-Shiung Wu", "Lise Meitner", "Emmy Noether", "Barbara McClintock"
+                              ];
+                              const unhandled = defaultArticles.filter(
+                                (t) => !resolvedArticles[t.trim().replace(/_/g, " ").toLowerCase()]
+                              );
+                              setBotStates((prev) => ({
+                                ...prev,
+                                [bot.id]: {
+                                  ...prev[bot.id],
+                                  articleQueue: unhandled,
+                                },
+                              }));
+                              addLog(bot.id, {
+                                timestamp: new Date().toLocaleTimeString(),
+                                level: "info",
+                                message: `Reloaded default queue: ${unhandled.length} unhandled articles (${defaultArticles.length - unhandled.length} already resolved were excluded).`,
+                              });
+                            }}
+                            className="text-[10px] text-indigo-400 hover:underline"
+                            title="Reload default unhandled articles"
+                          >
+                            Reset
+                          </button>
+                        </div>
                       </div>
 
                       <div className="flex items-baseline gap-2 mt-1">
@@ -1575,6 +1689,7 @@ export default function BotDashboardPage() {
               },
             }));
           }}
+          onReplenishQueue={() => replenishQueue(activeBot.id, true)}
           loggedInUsername={user?.username}
         />
       )}

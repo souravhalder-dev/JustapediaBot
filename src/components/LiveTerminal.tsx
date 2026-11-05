@@ -28,6 +28,7 @@ interface LiveTerminalProps {
   onClose: () => void;
   onToggleStatus: () => void;
   onClearLogs: () => void;
+  onReplenishQueue?: () => void;
   loggedInUsername?: string | null;
 }
 
@@ -38,6 +39,7 @@ export function LiveTerminal({
   onClose,
   onToggleStatus,
   onClearLogs,
+  onReplenishQueue,
   loggedInUsername,
 }: LiveTerminalProps) {
   const [filterLevel, setFilterLevel] = useState<string>("all");
@@ -373,7 +375,18 @@ export function LiveTerminal({
         {/* Terminal Status Footer */}
         <div className="px-4 py-2 bg-slate-900 border-t border-slate-800 flex items-center justify-between text-[11px] text-slate-400 font-sans">
           <div className="flex items-center gap-4">
-            <span>Queue: <strong className="text-white font-mono">{botState.articleQueue.length}</strong> left</span>
+            <span className="flex items-center gap-2">
+              <span>Queue: <strong className="text-white font-mono">{botState.articleQueue.length}</strong> left</span>
+              {onReplenishQueue && (
+                <button
+                  onClick={onReplenishQueue}
+                  className="px-2 py-0.5 rounded bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-300 hover:text-white border border-indigo-500/30 text-[10px] transition"
+                  title="Discover and append 50 fresh unhandled articles from Justapedia API"
+                >
+                  + Refill Queue (Justapedia API)
+                </button>
+              )}
+            </span>
             <span>Total Lifetime Edits: <strong className="text-white font-mono">{botState.totalEdits}</strong></span>
             <span>Success: <strong className="text-emerald-400 font-mono">{botState.successCount}</strong></span>
             <span>Errors: <strong className="text-rose-400 font-mono">{botState.errorCount}</strong></span>
