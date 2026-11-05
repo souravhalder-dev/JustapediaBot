@@ -35,7 +35,10 @@ import {
   Bot,
   RefreshCw,
   Check,
-  Wrench
+  Wrench,
+  ShieldAlert,
+  CheckCheck,
+  Trash2
 } from "lucide-react";
 
 export default function BotDashboardPage() {
@@ -78,6 +81,70 @@ export default function BotDashboardPage() {
   const [isLoadingCategory, setIsLoadingCategory] = useState(false);
   const [categoryLoadMessage, setCategoryLoadMessage] = useState<string | null>(null);
 
+  // Global Resolved Articles Protection Registry (prevents duplicate or unnecessary edits across all bots)
+  const [resolvedArticles, setResolvedArticles] = useState<Record<string, {
+    title: string;
+    resolvedAt: string;
+    resolvedByBot: string;
+    status: "verified_healthy" | "edited_and_resolved";
+    revid?: number;
+  }>>({});
+
+  // Load resolved articles from localStorage & server registry on mount
+  useEffect(() => {
+    let localDict: Record<string, any> = {};
+    if (typeof window !== "undefined") {
+      try {
+        const stored = localStorage.getItem("justapedia_resolved_articles");
+        if (stored) localDict = JSON.parse(stored);
+      } catch {
+        // ignore
+      }
+    }
+
+    fetch("/api/bot/resolved-articles")
+      .then((r) => r.json())
+      .then((data) => {
+        const serverDict: Record<string, any> = {};
+        if (data.success && Array.isArray(data.articles)) {
+          data.articles.forEach((item: any) => {
+            const norm = item.title.trim().replace(/_/g, " ").toLowerCase();
+            serverDict[norm] = item;
+          });
+        }
+        setResolvedArticles({ ...localDict, ...serverDict });
+      })
+      .catch(() => {
+        setResolvedArticles(localDict);
+      });
+  }, []);
+
+  // Sync to localStorage whenever resolvedArticles changes
+  useEffect(() => {
+    if (typeof window !== "undefined" && Object.keys(resolvedArticles).length > 0) {
+      try {
+        localStorage.setItem("justapedia_resolved_articles", JSON.stringify(resolvedArticles));
+      } catch {
+        // ignore
+      }
+    }
+  }, [resolvedArticles]);
+
+  const handleClearResolvedProtection = async () => {
+    if (!confirm("Are you sure you want to clear the resolved articles protection registry? This will allow bots to re-examine articles that were previously verified healthy or edited.")) {
+      return;
+    }
+    try {
+      await fetch("/api/bot/resolved-articles", { method: "DELETE" });
+      setResolvedArticles({});
+      if (typeof window !== "undefined") {
+        localStorage.removeItem("justapedia_resolved_articles");
+      }
+    } catch {
+      // ignore
+    }
+  };
+
   // References to running intervals
   const runIntervals = useRef<Record<string, NodeJS.Timeout | null>>({});
   const cooldownIntervals = useRef<Record<string, NodeJS.Timeout | null>>({});
@@ -89,21 +156,33 @@ export default function BotDashboardPage() {
       const res = await fetch(`/api/bot/category-members?category=${encodeURIComponent(categoryName)}&limit=50`);
       const data = await res.json();
       if (data.success && Array.isArray(data.members) && data.members.length > 0) {
+        // Exclude any articles that are already resolved to avoid duplicate edits
+        const unresolvedMembers = data.members.filter((title: string) => {
+          const norm = title.trim().replace(/_/g, " ").toLowerCase();
+          return !resolvedArticles[norm];
+        });
+        const skippedResolved = data.members.length - unresolvedMembers.length;
+
         setBotStates((prev) => ({
           ...prev,
           [botId]: {
             ...prev[botId],
-            articleQueue: data.members,
+            articleQueue: unresolvedMembers,
           },
         }));
-        setCategoryLoadMessage(`Loaded ${data.members.length} articles from Category:${data.category}`);
+
+        const statusNote = skippedResolved > 0
+          ? `Loaded ${unresolvedMembers.length} articles (${skippedResolved} previously resolved articles were automatically excluded to prevent duplicate edits)`
+          : `Loaded ${unresolvedMembers.length} articles from Category:${data.category}`;
+
+        setCategoryLoadMessage(statusNote);
         addLog(botId, {
           timestamp: new Date().toLocaleTimeString(),
           level: "cycle",
-          message: `[CATEGORY QUEUE LOADED] Imported ${data.members.length} articles from Category:${data.category}`,
+          message: `[CATEGORY QUEUE LOADED] ${statusNote}`,
         });
       } else {
-        setCategoryLoadMessage(`No articles found in Category:${categoryName}`);
+        setCategoryLoadMessage(`No unhandled articles found in Category:${categoryName}`);
       }
     } catch (err: any) {
       setCategoryLoadMessage(`Error: ${err.message}`);
@@ -372,7 +451,7 @@ export default function BotDashboardPage() {
     }, 1000);
   };
 
-  // Process single edit in queue
+  // Process single edit in queue (strictly prevents duplicate or unnecessary edits)
   const processNextEdit = (botId: string) => {
     setBotStates((prev) => {
       const currentState = prev[botId];
@@ -381,11 +460,47 @@ export default function BotDashboardPage() {
       }
 
       const queue = [...currentState.articleQueue];
-      if (queue.length === 0) return prev;
 
+      // Auto-stop bot when queue is completely processed
+      if (queue.length === 0) {
+        setTimeout(() => {
+          stopBot(botId);
+          addLog(botId, {
+            timestamp: new Date().toLocaleTimeString(),
+            level: "success",
+            message: `[QUEUE COMPLETE] All articles in the queue have been fully resolved. Bot automatically stopped to prevent redundant or duplicate edits.`,
+          });
+        }, 50);
+        return prev;
+      }
+
+      // Pop the next article (DO NOT re-queue! Once an article is handled, it is permanently resolved)
       const articleTitle = queue.shift()!;
-      queue.push(articleTitle);
+      const normTitle = articleTitle.trim().replace(/_/g, " ").toLowerCase();
 
+      // Check if already resolved by ANY bot (Rule: once resolved, never edit again)
+      if (resolvedArticles[normTitle]) {
+        const rec = resolvedArticles[normTitle];
+        addLog(botId, {
+          timestamp: new Date().toLocaleTimeString(),
+          level: "info",
+          articleTitle,
+          message: `[PROTECTION GUARD] "${articleTitle}" has already been processed and resolved (${rec.status === "verified_healthy" ? "verified clean with 0 issues" : `edited by ${rec.resolvedByBot} rev #${rec.revid || "live"}`}). Skipped to prevent duplicate edits.`,
+        });
+
+        return {
+          ...prev,
+          [botId]: {
+            ...currentState,
+            articleQueue: queue, // article removed from queue
+            processedCount: currentState.processedCount + 1,
+            lastArticleProcessed: articleTitle,
+            lastEditTimestamp: new Date().toLocaleTimeString(),
+          },
+        };
+      }
+
+      // Article has not been resolved yet: execute specialized bot inspection
       executeBotAction(botId, articleTitle, currentState.currentCycleEdits + 1);
 
       return {
@@ -401,6 +516,7 @@ export default function BotDashboardPage() {
   // Perform genuine bot action via dedicated feature engine
   const executeBotAction = async (botId: string, articleTitle: string, cycleEditIdx: number) => {
     const timestamp = new Date().toLocaleTimeString();
+    const normTitle = articleTitle.trim().replace(/_/g, " ").toLowerCase();
 
     try {
       const res = await fetch("/api/bot/execute-step", {
@@ -439,15 +555,58 @@ export default function BotDashboardPage() {
         return;
       }
 
+      // 1. Article was already resolved (server protection guard triggered)
+      if (data.alreadyResolved || data.skipped) {
+        setResolvedArticles((prev) => ({
+          ...prev,
+          [normTitle]: {
+            title: articleTitle,
+            resolvedAt: data.record?.resolvedAt || timestamp,
+            resolvedByBot: data.record?.resolvedByBot || botId,
+            status: data.record?.status || "verified_healthy",
+            revid: data.record?.revid,
+          },
+        }));
+
+        addLog(botId, {
+          timestamp,
+          level: "info",
+          articleTitle,
+          message: data.message,
+        });
+
+        setBotStates((prev) => ({
+          ...prev,
+          [botId]: {
+            ...prev[botId],
+            processedCount: prev[botId].processedCount + 1,
+            lastArticleProcessed: articleTitle,
+            lastEditTimestamp: timestamp,
+          },
+        }));
+        return;
+      }
+
+      // 2. Genuine modification was saved: All issues on article are now resolved
       if (data.modified && data.saved) {
-        // Genuine modification was saved to Justapedia
+        setResolvedArticles((prev) => ({
+          ...prev,
+          [normTitle]: {
+            title: articleTitle,
+            resolvedAt: timestamp,
+            resolvedByBot: botId,
+            status: "edited_and_resolved",
+            revid: data.revid,
+          },
+        }));
+
         addLog(botId, {
           timestamp,
           level: "success",
           articleTitle,
           diffUrl: data.diff_url,
           revid: data.revid,
-          message: `[SAVE SUCCESS] ${data.message} (rev #${data.revid || "live"}) by @${data.editor || user?.username}`,
+          message: `[RESOLVED & SAVED] ${data.message} (rev #${data.revid || "live"}) by @${data.editor || user?.username}. All identified issues resolved; article protected against future duplicate edits.`,
         });
 
         setBotStates((prev) => {
@@ -471,12 +630,22 @@ export default function BotDashboardPage() {
           };
         });
       } else {
-        // No modifications needed, article is already healthy and accurate
+        // 3. Article has NO identified issues: Mark resolved healthy (Rule: No bot edits an article if it has no issues)
+        setResolvedArticles((prev) => ({
+          ...prev,
+          [normTitle]: {
+            title: articleTitle,
+            resolvedAt: timestamp,
+            resolvedByBot: botId,
+            status: "verified_healthy",
+          },
+        }));
+
         addLog(botId, {
           timestamp,
           level: "info",
           articleTitle,
-          message: `[VERIFIED] ${data.message}`,
+          message: `[VERIFIED HEALTHY - NO ISSUES] ${data.message}. No edits made. Marked as resolved to prevent duplicate checks.`,
         });
 
         setBotStates((prev) => ({
@@ -765,7 +934,7 @@ export default function BotDashboardPage() {
           </div>
 
           {/* Metrics Quick Strip */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3.5">
             <div className="bg-slate-900/50 border border-slate-800/80 rounded-xl p-3.5">
               <span className="text-xs text-slate-400 block mb-1">Active Bots</span>
               <div className="flex items-center gap-2">
@@ -797,19 +966,58 @@ export default function BotDashboardPage() {
                 <span className="text-xs text-slate-500">edits</span>
               </div>
             </div>
+
+            <div className="bg-slate-900/50 border border-emerald-500/30 rounded-xl p-3.5">
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-xs text-emerald-400 font-medium flex items-center gap-1">
+                  <CheckCheck className="w-3.5 h-3.5" />
+                  <span>Duplicate Guard</span>
+                </span>
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-2xl font-extrabold text-white font-mono">
+                  {Object.keys(resolvedArticles).length}
+                </span>
+                <span className="text-xs text-slate-400">protected</span>
+              </div>
+              <span className="text-[10px] text-slate-500 mt-1 block truncate">
+                {Object.values(resolvedArticles).filter((a) => a.status === "verified_healthy").length} clean • {Object.values(resolvedArticles).filter((a) => a.status === "edited_and_resolved").length} resolved
+              </span>
+            </div>
           </div>
 
-          {/* Safety Destination Selector */}
+          {/* Safety Destination Selector & Duplicate Guard Info */}
           <div className="mt-6 flex flex-wrap items-center justify-between gap-4 p-3 rounded-xl bg-slate-900/80 border border-slate-800">
-            <div className="flex items-center gap-2 text-xs text-slate-300">
-              <Sliders className="w-4 h-4 text-indigo-400" />
-              <span>Target Page Destination:</span>
-              <span className="font-semibold text-white">
-                {useSandbox ? "Justapedia:Sandbox (Safe Draft Testing)" : "Live Wiki Pages (Direct Production Publishing)"}
-              </span>
+            <div className="flex flex-wrap items-center gap-4 text-xs text-slate-300">
+              <div className="flex items-center gap-2">
+                <Sliders className="w-4 h-4 text-indigo-400" />
+                <span>Destination:</span>
+                <span className="font-semibold text-white">
+                  {useSandbox ? "Justapedia:Sandbox (Safe Draft Testing)" : "Live Wiki Pages (Direct Publishing)"}
+                </span>
+              </div>
+
+              <div className="h-4 w-px bg-slate-800 hidden sm:block" />
+
+              <div className="flex items-center gap-1.5 text-emerald-300 text-[11px]">
+                <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 flex-shrink-0" />
+                <span>Rule Active: No bot edits an article without issues. Once resolved, articles are permanently protected from duplicate edits.</span>
+              </div>
             </div>
 
             <div className="flex items-center gap-2">
+              {Object.keys(resolvedArticles).length > 0 && (
+                <button
+                  onClick={handleClearResolvedProtection}
+                  className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-rose-300 text-xs transition flex items-center gap-1.5 border border-slate-700 mr-2"
+                  title="Clear resolved registry to allow re-auditing"
+                >
+                  <Trash2 className="w-3 h-3 text-rose-400" />
+                  <span>Reset Protected ({Object.keys(resolvedArticles).length})</span>
+                </button>
+              )}
+
               <button
                 onClick={() => setUseSandbox(true)}
                 className={`px-3 py-1 rounded-lg text-xs font-medium transition ${
@@ -961,7 +1169,7 @@ export default function BotDashboardPage() {
 
                 {/* Bot Live Activity Monitoring Strip */}
                 <div className="p-5 sm:p-6 bg-slate-950/60">
-                  <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3.5 mb-4">
                     
                     {/* Cycle Progress Bar */}
                     <div className="md:col-span-2 p-3.5 rounded-xl bg-slate-900/60 border border-slate-800/80">
@@ -1028,8 +1236,62 @@ export default function BotDashboardPage() {
                           <span className="text-xs text-slate-500 italic">No operations processed yet</span>
                         )}
                       </div>
-                      <span className="text-[11px] text-slate-500 mt-1">
+                      <span className="text-[11px] text-slate-500 mt-1 truncate">
                         {state.lastEditTimestamp ? `Last at ${state.lastEditTimestamp}` : "Ready to launch"}
+                      </span>
+                    </div>
+
+                    {/* Queue & Duplicate Protection Status */}
+                    <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800/80 flex flex-col justify-between">
+                      <div className="flex items-center justify-between text-xs text-slate-400">
+                        <span className="flex items-center gap-1">
+                          <CheckCheck className="w-3.5 h-3.5 text-emerald-400" />
+                          <span>Queue Status</span>
+                        </span>
+                        <button
+                          onClick={() => {
+                            const defaultArticles = [
+                              "Albert Einstein", "Ada Lovelace", "Alan Turing", "Marie Curie", "Nikola Tesla",
+                              "Isaac Newton", "Galileo Galilei", "Johannes Kepler", "Charles Darwin", "Carl Sagan",
+                              "Stephen Hawking", "Richard Feynman", "Hypatia", "Rosalind Franklin", "Grace Hopper",
+                              "Katherine Johnson", "Chien-Shiung Wu", "Lise Meitner", "Emmy Noether", "Barbara McClintock"
+                            ];
+                            const unhandled = defaultArticles.filter(
+                              (t) => !resolvedArticles[t.trim().replace(/_/g, " ").toLowerCase()]
+                            );
+                            setBotStates((prev) => ({
+                              ...prev,
+                              [bot.id]: {
+                                ...prev[bot.id],
+                                articleQueue: unhandled,
+                              },
+                            }));
+                            addLog(bot.id, {
+                              timestamp: new Date().toLocaleTimeString(),
+                              level: "info",
+                              message: `Reloaded default queue: ${unhandled.length} unhandled articles (${defaultArticles.length - unhandled.length} already resolved were excluded).`,
+                            });
+                          }}
+                          className="text-[10px] text-indigo-400 hover:underline"
+                          title="Reload default unhandled articles"
+                        >
+                          Reset Queue
+                        </button>
+                      </div>
+
+                      <div className="flex items-baseline gap-2 mt-1">
+                        <span className={`text-2xl font-extrabold font-mono ${
+                          state.articleQueue.length === 0 ? "text-emerald-400" : "text-white"
+                        }`}>
+                          {state.articleQueue.length}
+                        </span>
+                        <span className="text-xs text-slate-400 font-medium">
+                          {state.articleQueue.length === 0 ? "All resolved" : "remaining in queue"}
+                        </span>
+                      </div>
+
+                      <span className="text-[10px] text-slate-500 mt-1 truncate">
+                        {state.articleQueue.length > 0 ? `Next: ${state.articleQueue[0]}` : "Queue complete — no duplicate edits"}
                       </span>
                     </div>
 

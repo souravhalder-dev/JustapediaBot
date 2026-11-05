@@ -69,7 +69,7 @@ export async function executeJustapediaEdit(
 
   try {
     // 2. Strictly verify the current authenticated identity with Justapedia Action API
-    const userinfoUrl = `${JUSTAPEDIA_API}?action=query&meta=userinfo&format=json`;
+    const userinfoUrl = `${JUSTAPEDIA_API}?action=query&meta=userinfo&uiprop=groups|rights&format=json`;
     const userinfoResp = await fetch(userinfoUrl, {
       method: "GET",
       headers: {
@@ -100,6 +100,10 @@ export async function executeJustapediaEdit(
         raw_response: uinfo,
       };
     }
+
+    const userRights: string[] = Array.isArray(uinfo?.rights) ? uinfo.rights : [];
+    const userGroups: string[] = Array.isArray(uinfo?.groups) ? uinfo.groups : [];
+    const hasBotPermission = userRights.includes("bot") || userGroups.includes("bot");
 
     if (expectedUsername && actualUsername.toLowerCase() !== expectedUsername.toLowerCase()) {
       return {
@@ -151,7 +155,10 @@ export async function executeJustapediaEdit(
     formData.append("format", "json");
 
     if (is_minor) formData.append("minor", "1");
-    if (is_bot) formData.append("bot", "1");
+    // Only send bot=1 if the authenticated user account has the bot permission
+    if (is_bot && hasBotPermission) {
+      formData.append("bot", "1");
+    }
     if (basetimestamp && !use_sandbox) {
       formData.append("basetimestamp", basetimestamp);
     }
@@ -194,6 +201,20 @@ export async function executeJustapediaEdit(
           success: false,
           title: targetTitle,
           message: `Edit Conflict on Justapedia: ${errorInfo}. Please refresh and re-examine the latest page revision.`,
+          raw_response: data,
+        };
+      } else if (errorCode === "confirmemail") {
+        return {
+          success: false,
+          title: targetTitle,
+          message: `Email confirmation required: Your Justapedia account (@${actualUsername}) must validate its email address before making edits. Please visit [[Special:Preferences]] to confirm your email.`,
+          raw_response: data,
+        };
+      } else if (errorCode === "hookaborted") {
+        return {
+          success: false,
+          title: targetTitle,
+          message: `Edit aborted by Justapedia extension hook (${errorInfo}).`,
           raw_response: data,
         };
       } else {

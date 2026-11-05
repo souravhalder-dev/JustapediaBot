@@ -206,6 +206,8 @@ export function LiveTerminal({
           </div>
 
           <div className="flex items-center gap-2">
+            <span className="text-emerald-400 font-mono">Duplicate Guard Active</span>
+            <span>•</span>
             <span className="text-indigo-400 font-mono">100 edits/min pacing</span>
             <span>•</span>
             <span className="text-slate-500">60s cycle cooldown</span>
@@ -371,6 +373,7 @@ export function LiveTerminal({
         {/* Terminal Status Footer */}
         <div className="px-4 py-2 bg-slate-900 border-t border-slate-800 flex items-center justify-between text-[11px] text-slate-400 font-sans">
           <div className="flex items-center gap-4">
+            <span>Queue: <strong className="text-white font-mono">{botState.articleQueue.length}</strong> left</span>
             <span>Total Lifetime Edits: <strong className="text-white font-mono">{botState.totalEdits}</strong></span>
             <span>Success: <strong className="text-emerald-400 font-mono">{botState.successCount}</strong></span>
             <span>Errors: <strong className="text-rose-400 font-mono">{botState.errorCount}</strong></span>
