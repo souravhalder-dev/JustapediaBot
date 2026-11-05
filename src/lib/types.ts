@@ -4,7 +4,7 @@ export interface ExtractedLink {
   id: string;
   url: string;
   domain: string;
-  linkType: 'reference' | 'template' | 'bare';
+  linkType: 'reference' | 'template' | 'bare' | 'external';
   templateName?: string;
   rawString: string;
   status: LinkStatus;
@@ -152,6 +152,18 @@ export interface BotDefinition {
   iconName: string;
 }
 
+export interface IABotDetailedStats {
+  articlesProcessed: number;
+  referencesChecked: number;
+  deadLinksDetected: number;
+  archiveLinksAdded: number;
+  archiveLinksRepaired: number;
+  newSnapshotsRequested: number;
+  unrecoverableLinksTagged: number;
+  articlesModified: number;
+  failedOperations: number;
+}
+
 export interface BotState {
   botId: string;
   status: BotRunStatus;
@@ -169,4 +181,5 @@ export interface BotState {
   processedCount: number;
   successCount: number;
   errorCount: number;
+  detailedStats?: IABotDetailedStats;
 }

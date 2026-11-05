@@ -116,7 +116,7 @@ export async function POST(req: NextRequest) {
             id: item.id,
             url: item.url,
             domain: item.domain,
-            linkType: item.linkType,
+            linkType: item.linkType === "external" ? "bare" : item.linkType,
             templateName: item.templateName,
             rawString: item.rawString,
             status: health.status,

@@ -5,7 +5,7 @@ import Link from "next/link";
 import { motion, AnimatePresence } from "framer-motion";
 import { useAuth } from "@/context/AuthContext";
 import { AVAILABLE_BOTS, createInitialBotState } from "@/lib/bot-registry";
-import { BotDefinition, BotState, BotTerminalLog } from "@/lib/types";
+import { BotDefinition, BotState, BotTerminalLog, IABotDetailedStats } from "@/lib/types";
 import { LiveTerminal } from "@/components/LiveTerminal";
 import {
   Play,
@@ -32,7 +32,10 @@ import {
   KeyRound,
   Eye,
   EyeOff,
-  Bot
+  Bot,
+  RefreshCw,
+  Check,
+  Wrench
 } from "lucide-react";
 
 export default function BotDashboardPage() {
@@ -64,9 +67,80 @@ export default function BotDashboardPage() {
   // Global Sandbox Mode toggle (for safe testing)
   const [useSandbox, setUseSandbox] = useState<boolean>(true);
 
+  // Wikipedia IABot options & Category Crawling
+  const [iabotOptions, setIabotOptions] = useState({
+    archiveWorkingLinks: false,
+    repairBrokenArchives: true,
+    tagUnrecoverableDead: true,
+    maxLinksPerPage: 10,
+  });
+  const [categoryInput, setCategoryInput] = useState("All articles with dead external links");
+  const [isLoadingCategory, setIsLoadingCategory] = useState(false);
+  const [categoryLoadMessage, setCategoryLoadMessage] = useState<string | null>(null);
+
   // References to running intervals
   const runIntervals = useRef<Record<string, NodeJS.Timeout | null>>({});
   const cooldownIntervals = useRef<Record<string, NodeJS.Timeout | null>>({});
+
+  const handleLoadCategoryArticles = async (botId: string, categoryName: string) => {
+    setIsLoadingCategory(true);
+    setCategoryLoadMessage(null);
+    try {
+      const res = await fetch(`/api/bot/category-members?category=${encodeURIComponent(categoryName)}&limit=50`);
+      const data = await res.json();
+      if (data.success && Array.isArray(data.members) && data.members.length > 0) {
+        setBotStates((prev) => ({
+          ...prev,
+          [botId]: {
+            ...prev[botId],
+            articleQueue: data.members,
+          },
+        }));
+        setCategoryLoadMessage(`Loaded ${data.members.length} articles from Category:${data.category}`);
+        addLog(botId, {
+          timestamp: new Date().toLocaleTimeString(),
+          level: "cycle",
+          message: `[CATEGORY QUEUE LOADED] Imported ${data.members.length} articles from Category:${data.category}`,
+        });
+      } else {
+        setCategoryLoadMessage(`No articles found in Category:${categoryName}`);
+      }
+    } catch (err: any) {
+      setCategoryLoadMessage(`Error: ${err.message}`);
+    } finally {
+      setIsLoadingCategory(false);
+    }
+  };
+
+  const updateDetailedStats = (
+    prevDetailed: IABotDetailedStats | undefined,
+    newStats: any,
+    isModified: boolean,
+    isError: boolean
+  ): IABotDetailedStats => {
+    const d = prevDetailed || {
+      articlesProcessed: 0,
+      referencesChecked: 0,
+      deadLinksDetected: 0,
+      archiveLinksAdded: 0,
+      archiveLinksRepaired: 0,
+      newSnapshotsRequested: 0,
+      unrecoverableLinksTagged: 0,
+      articlesModified: 0,
+      failedOperations: 0,
+    };
+    return {
+      articlesProcessed: d.articlesProcessed + (isError ? 0 : 1),
+      referencesChecked: d.referencesChecked + (newStats?.referencesChecked || 0),
+      deadLinksDetected: d.deadLinksDetected + (newStats?.deadLinksDetected || 0),
+      archiveLinksAdded: d.archiveLinksAdded + (newStats?.archiveLinksAdded || 0),
+      archiveLinksRepaired: d.archiveLinksRepaired + (newStats?.archiveLinksRepaired || 0),
+      newSnapshotsRequested: d.newSnapshotsRequested + (newStats?.newSnapshotsRequested || 0),
+      unrecoverableLinksTagged: d.unrecoverableLinksTagged + (newStats?.unrecoverableLinksTagged || 0),
+      articlesModified: d.articlesModified + (isModified ? 1 : 0),
+      failedOperations: d.failedOperations + (isError ? 1 : 0),
+    };
+  };
 
   // Stop all running bots if user logs out
   useEffect(() => {
@@ -339,6 +413,7 @@ export default function BotDashboardPage() {
           botId,
           articleTitle,
           use_sandbox: useSandbox,
+          options: botId === "internet-bot" ? iabotOptions : undefined,
         }),
       });
 
@@ -356,6 +431,7 @@ export default function BotDashboardPage() {
           [botId]: {
             ...prev[botId],
             errorCount: prev[botId].errorCount + 1,
+            detailedStats: updateDetailedStats(prev[botId]?.detailedStats, null, false, true),
             lastArticleProcessed: articleTitle,
             lastEditTimestamp: timestamp,
           },
@@ -388,6 +464,7 @@ export default function BotDashboardPage() {
               sessionEdits: s.sessionEdits + 1,
               currentCycleEdits: nextCycle,
               successCount: s.successCount + 1,
+              detailedStats: updateDetailedStats(s.detailedStats, data.stats, true, false),
               lastArticleProcessed: articleTitle,
               lastEditTimestamp: timestamp,
             },
@@ -407,6 +484,7 @@ export default function BotDashboardPage() {
           [botId]: {
             ...prev[botId],
             processedCount: prev[botId].processedCount + 1,
+            detailedStats: updateDetailedStats(prev[botId]?.detailedStats, data.stats, false, false),
             lastArticleProcessed: articleTitle,
             lastEditTimestamp: timestamp,
           },
@@ -424,6 +502,7 @@ export default function BotDashboardPage() {
         [botId]: {
           ...prev[botId],
           errorCount: prev[botId].errorCount + 1,
+          detailedStats: updateDetailedStats(prev[botId]?.detailedStats, null, false, true),
           lastArticleProcessed: articleTitle,
           lastEditTimestamp: timestamp,
         },
@@ -970,6 +1049,230 @@ export default function BotDashboardPage() {
                       </span>
                     ))}
                   </div>
+
+                  {/* Wikipedia IABot Full Operations Suite (Card #1) */}
+                  {bot.id === "internet-bot" && (
+                    <div className="mt-5 pt-5 border-t border-slate-800/80 space-y-4">
+                      
+                      {/* Section Header */}
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <ShieldCheck className="w-4 h-4 text-indigo-400" />
+                          <h4 className="text-xs font-bold text-white uppercase tracking-wider">
+                            Wikipedia InternetArchiveBot Operations Matrix
+                          </h4>
+                        </div>
+                        <span className="text-[11px] text-slate-400 font-mono">
+                          Wayback CDX Server • Save Page Now • {"{{dead link}}"}
+                        </span>
+                      </div>
+
+                      {/* 6-Metric IABot Detailed Stats Grid */}
+                      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5">
+                        <div className="p-3 rounded-xl bg-slate-900/80 border border-slate-800">
+                          <span className="text-[10px] uppercase tracking-wider text-slate-400 font-medium block">
+                            References Checked
+                          </span>
+                          <span className="text-xl font-bold text-white font-mono mt-1 block">
+                            {state.detailedStats?.referencesChecked ?? 0}
+                          </span>
+                        </div>
+
+                        <div className="p-3 rounded-xl bg-slate-900/80 border border-rose-500/20">
+                          <span className="text-[10px] uppercase tracking-wider text-rose-300 font-medium block">
+                            Dead Detected
+                          </span>
+                          <span className="text-xl font-bold text-rose-400 font-mono mt-1 block">
+                            {state.detailedStats?.deadLinksDetected ?? 0}
+                          </span>
+                        </div>
+
+                        <div className="p-3 rounded-xl bg-slate-900/80 border border-emerald-500/20">
+                          <span className="text-[10px] uppercase tracking-wider text-emerald-300 font-medium block">
+                            Archives Added
+                          </span>
+                          <span className="text-xl font-bold text-emerald-400 font-mono mt-1 block">
+                            {state.detailedStats?.archiveLinksAdded ?? 0}
+                          </span>
+                        </div>
+
+                        <div className="p-3 rounded-xl bg-slate-900/80 border border-cyan-500/20">
+                          <span className="text-[10px] uppercase tracking-wider text-cyan-300 font-medium block">
+                            Archives Repaired
+                          </span>
+                          <span className="text-xl font-bold text-cyan-400 font-mono mt-1 block">
+                            {state.detailedStats?.archiveLinksRepaired ?? 0}
+                          </span>
+                        </div>
+
+                        <div className="p-3 rounded-xl bg-slate-900/80 border border-indigo-500/20">
+                          <span className="text-[10px] uppercase tracking-wider text-indigo-300 font-medium block">
+                            Snapshots Saved
+                          </span>
+                          <span className="text-xl font-bold text-indigo-400 font-mono mt-1 block">
+                            {state.detailedStats?.newSnapshotsRequested ?? 0}
+                          </span>
+                        </div>
+
+                        <div className="p-3 rounded-xl bg-slate-900/80 border border-amber-500/20">
+                          <span className="text-[10px] uppercase tracking-wider text-amber-300 font-medium block">
+                            Tagged Dead
+                          </span>
+                          <span className="text-xl font-bold text-amber-400 font-mono mt-1 block">
+                            {state.detailedStats?.unrecoverableLinksTagged ?? 0}
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Controls Strip: Category Crawling + Intelligent Options */}
+                      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 pt-1">
+                        
+                        {/* Category Crawler */}
+                        <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 flex flex-col justify-between">
+                          <div>
+                            <div className="flex items-center justify-between mb-2">
+                              <span className="text-xs font-bold text-white flex items-center gap-1.5">
+                                <FolderKanban className="w-3.5 h-3.5 text-indigo-400" />
+                                <span>Category Crawling & Queue</span>
+                              </span>
+                              <span className="text-[11px] text-indigo-300 font-mono bg-indigo-950/60 px-2 py-0.5 rounded border border-indigo-800/40">
+                                {state.articleQueue.length} pages in queue
+                              </span>
+                            </div>
+
+                            <p className="text-[11px] text-slate-400 mb-3 leading-relaxed">
+                              Scan articles belonging to Justapedia categories with dead external links or maintenance backlogs:
+                            </p>
+
+                            <div className="flex gap-2 mb-2.5">
+                              <input
+                                type="text"
+                                value={categoryInput}
+                                onChange={(e) => setCategoryInput(e.target.value)}
+                                placeholder="e.g. All articles with dead external links"
+                                className="flex-1 px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-800 text-xs text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                              />
+                              <button
+                                onClick={() => handleLoadCategoryArticles(bot.id, categoryInput)}
+                                disabled={isLoadingCategory}
+                                className="px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-medium transition flex items-center gap-1.5 flex-shrink-0 shadow-sm"
+                              >
+                                {isLoadingCategory ? (
+                                  <span className="w-3.5 h-3.5 border-2 border-white/20 border-t-white rounded-full animate-spin" />
+                                ) : (
+                                  <RefreshCw className="w-3.5 h-3.5" />
+                                )}
+                                <span>Load Category</span>
+                              </button>
+                            </div>
+
+                            {/* Quick Category Chips */}
+                            <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
+                              <span className="text-slate-500">Quick suggestions:</span>
+                              {[
+                                "All articles with dead external links",
+                                "Articles with permanently dead external links",
+                                "Articles with dead external links",
+                              ].map((cat) => (
+                                <button
+                                  key={cat}
+                                  type="button"
+                                  onClick={() => {
+                                    setCategoryInput(cat);
+                                    handleLoadCategoryArticles(bot.id, cat);
+                                  }}
+                                  className="px-2 py-0.5 rounded-md bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700/60 transition"
+                                >
+                                  {cat.replace("Articles with ", "")}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+
+                          {categoryLoadMessage && (
+                            <div className="mt-3 text-[11px] text-emerald-300 flex items-center gap-1.5 pt-2 border-t border-slate-800/60">
+                              <Check className="w-3 h-3 text-emerald-400" />
+                              <span>{categoryLoadMessage}</span>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Behavior Toggles */}
+                        <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 flex flex-col justify-between">
+                          <div>
+                            <div className="flex items-center justify-between mb-2">
+                              <span className="text-xs font-bold text-white flex items-center gap-1.5">
+                                <Sliders className="w-3.5 h-3.5 text-indigo-400" />
+                                <span>Intelligent Processing Matrix</span>
+                              </span>
+                              <span className="text-[11px] text-emerald-400 font-mono">
+                                Zero Content Rewriting
+                              </span>
+                            </div>
+
+                            <p className="text-[11px] text-slate-400 mb-3 leading-relaxed">
+                              Configure Wikipedia IABot core heuristics for Justapedia references:
+                            </p>
+
+                            <div className="space-y-2.5">
+                              <label className="flex items-start gap-2.5 cursor-pointer select-none">
+                                <input
+                                  type="checkbox"
+                                  checked={iabotOptions.archiveWorkingLinks}
+                                  onChange={(e) =>
+                                    setIabotOptions((prev) => ({ ...prev, archiveWorkingLinks: e.target.checked }))
+                                  }
+                                  className="mt-0.5 rounded border-slate-700 bg-slate-950 text-indigo-600 focus:ring-0 w-3.5 h-3.5"
+                                />
+                                <div className="text-[11px]">
+                                  <strong className="text-white block font-medium">Archive Working Links (Save Page Now)</strong>
+                                  <span className="text-slate-400">Proactively queue accessible references to Wayback Machine and record url-status=live</span>
+                                </div>
+                              </label>
+
+                              <label className="flex items-start gap-2.5 cursor-pointer select-none">
+                                <input
+                                  type="checkbox"
+                                  checked={iabotOptions.repairBrokenArchives}
+                                  onChange={(e) =>
+                                    setIabotOptions((prev) => ({ ...prev, repairBrokenArchives: e.target.checked }))
+                                  }
+                                  className="mt-0.5 rounded border-slate-700 bg-slate-950 text-indigo-600 focus:ring-0 w-3.5 h-3.5"
+                                />
+                                <div className="text-[11px]">
+                                  <strong className="text-white block font-medium">Repair Broken Archive Links</strong>
+                                  <span className="text-slate-400">Query CDX API to replace corrupted or dead Wayback snapshots with valid 200 captures</span>
+                                </div>
+                              </label>
+
+                              <label className="flex items-start gap-2.5 cursor-pointer select-none">
+                                <input
+                                  type="checkbox"
+                                  checked={iabotOptions.tagUnrecoverableDead}
+                                  onChange={(e) =>
+                                    setIabotOptions((prev) => ({ ...prev, tagUnrecoverableDead: e.target.checked }))
+                                  }
+                                  className="mt-0.5 rounded border-slate-700 bg-slate-950 text-indigo-600 focus:ring-0 w-3.5 h-3.5"
+                                />
+                                <div className="text-[11px]">
+                                  <strong className="text-white block font-medium">Handle Unrecoverable Dead Links</strong>
+                                  <span className="text-slate-400">Apply {"{{dead link |date=... |fix-attempted=yes}}"} when no archive snapshot exists</span>
+                                </div>
+                              </label>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center justify-between text-[11px] text-slate-500 pt-3 border-t border-slate-800/60 mt-3">
+                            <span>Max Links Per Page: <strong>{iabotOptions.maxLinksPerPage}</strong></span>
+                            <span className="text-indigo-400 font-mono">100% Attribution to @{user.username}</span>
+                          </div>
+
+                        </div>
+
+                      </div>
+
+                    </div>
+                  )}
 
                 </div>
               </div>

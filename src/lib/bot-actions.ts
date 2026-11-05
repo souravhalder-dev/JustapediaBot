@@ -1,7 +1,5 @@
 import { fetchJustapediaPage } from "./justapedia";
-import { extractLinksFromWikitext } from "./parser";
-import { checkUrlHealth } from "./link-checker";
-import { checkWaybackAvailability } from "./wayback";
+import { processArticleWithIABot, IABotRunOptions, IABotStats } from "./iabot-engine";
 
 export interface BotActionResult {
   modified: boolean;
@@ -10,95 +8,31 @@ export interface BotActionResult {
   summary?: string;
   details: string;
   changesCount?: number;
+  stats?: IABotStats;
 }
 
 /**
- * 1. InternetBot Real Feature Engine
- * Link rot repair, checking external links, adding Wayback Machine snapshots.
- * NEVER replaces page with dummy text. Keeps 100% of existing content.
+ * 1. InternetBot: Full Wikipedia InternetArchiveBot Replication for Justapedia
+ * Replicates dead link detection, Wayback CDX searching, archive repairing,
+ * citation template patching, and unrecoverable link tagging.
  */
-export async function runInternetBotOnArticle(title: string): Promise<BotActionResult> {
-  const page = await fetchJustapediaPage(title);
-  if (!page.exists || !page.wikitext.trim()) {
-    return {
-      modified: false,
-      details: `Article "${title}" does not exist or is empty on Justapedia. Skipped.`,
-    };
-  }
-
-  const originalWikitext = page.wikitext;
-  const links = extractLinksFromWikitext(originalWikitext);
-
-  if (links.length === 0) {
-    return {
-      modified: false,
-      originalWikitext,
-      details: `No external links found in "${title}". No modifications needed.`,
-    };
-  }
-
-  // Scan links (check up to 5 external links per page for efficiency)
-  let updatedWikitext = originalWikitext;
-  let fixedCount = 0;
-  const sampleLinks = links.slice(0, 5);
-
-  for (const link of sampleLinks) {
-    try {
-      const health = await checkUrlHealth(link.url);
-      
-      // If dead or error, look for Wayback snapshot
-      if (health.status === "dead" || health.status === "error") {
-        const snapshot = await checkWaybackAvailability(link.url);
-
-        if (snapshot?.available) {
-          const snapshotUrl = snapshot.url;
-          const snapshotDate = snapshot.timestamp.substring(0, 8);
-
-          if (link.rawString.includes("{{cite") || link.rawString.includes("{{Cite")) {
-            if (!link.rawString.includes("archive-url") && !link.rawString.includes("archiveurl")) {
-              const patched = link.rawString.replace(
-                /}}$/,
-                ` |archive-url=${snapshotUrl} |archive-date=${snapshotDate} |url-status=dead}}`
-              );
-              if (patched !== link.rawString) {
-                updatedWikitext = updatedWikitext.replace(link.rawString, patched);
-                fixedCount++;
-              }
-            }
-          } else if (!link.rawString.includes("webarchive") && !link.rawString.includes("archive.org")) {
-            const patched = `${link.rawString} {{webarchive |url=${snapshotUrl} |date=${snapshotDate}}}`;
-            updatedWikitext = updatedWikitext.replace(link.rawString, patched);
-            fixedCount++;
-          }
-        } else if (!link.rawString.includes("dead link") && !link.rawString.includes("deadlink")) {
-          // Tag dead link without snapshot
-          const now = new Date();
-          const dateStr = `${now.toLocaleString("en-US", { month: "long" })} ${now.getFullYear()}`;
-          const patched = `${link.rawString} {{dead link |date=${dateStr}}}`;
-          updatedWikitext = updatedWikitext.replace(link.rawString, patched);
-          fixedCount++;
-        }
-      }
-    } catch {
-      // Continue to next link on individual lookup failure
-    }
-  }
-
-  if (fixedCount === 0 || updatedWikitext === originalWikitext) {
-    return {
-      modified: false,
-      originalWikitext,
-      details: `Checked ${sampleLinks.length} external citation links on "${title}". All links are healthy or already archived.`,
-    };
-  }
+export async function runInternetBotOnArticle(
+  title: string,
+  options?: IABotRunOptions
+): Promise<BotActionResult> {
+  const result = await processArticleWithIABot(title, options);
 
   return {
-    modified: true,
-    originalWikitext,
-    fixedWikitext: updatedWikitext,
-    changesCount: fixedCount,
-    summary: `InternetBot: Rescued ${fixedCount} broken/dead citation(s) with Wayback Machine archive snapshots`,
-    details: `Successfully patched ${fixedCount} external citation(s) with verified Wayback Machine snapshots.`,
+    modified: result.modified,
+    originalWikitext: result.originalWikitext,
+    fixedWikitext: result.fixedWikitext,
+    summary: result.summary,
+    details: result.details.join(" • "),
+    changesCount:
+      result.stats.archiveLinksAdded +
+      result.stats.archiveLinksRepaired +
+      result.stats.unrecoverableLinksTagged,
+    stats: result.stats,
   };
 }
 
@@ -294,10 +228,14 @@ export async function runCategoryMaintenanceBotOnArticle(title: string): Promise
 /**
  * Dispatcher to route bot action to its genuine specialized engine
  */
-export async function executeBotFeature(botId: string, articleTitle: string): Promise<BotActionResult> {
+export async function executeBotFeature(
+  botId: string,
+  articleTitle: string,
+  options?: IABotRunOptions
+): Promise<BotActionResult> {
   switch (botId) {
     case "internet-bot":
-      return await runInternetBotOnArticle(articleTitle);
+      return await runInternetBotOnArticle(articleTitle, options);
     case "birth-update-bot":
       return await runBirthUpdateBotOnArticle(articleTitle);
     case "citation-verifier-bot":

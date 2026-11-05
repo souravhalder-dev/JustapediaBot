@@ -124,3 +124,52 @@ export async function searchJustapedia(query: string): Promise<Array<{ title: st
     return [];
   }
 }
+
+/**
+ * Fetch member articles of any Justapedia category (e.g. Category:All articles with dead external links)
+ * Matches Wikipedia IABot category crawling workflow
+ */
+export async function fetchCategoryMembers(
+  categoryTitle: string,
+  limit: number = 50,
+  cmcontinue?: string
+): Promise<{ members: string[]; cmcontinue?: string }> {
+  let cat = categoryTitle.trim();
+  if (!cat.toLowerCase().startsWith("category:")) {
+    cat = `Category:${cat}`;
+  }
+
+  const params = new URLSearchParams({
+    action: "query",
+    list: "categorymembers",
+    cmtitle: cat,
+    cmlimit: String(Math.min(limit, 100)),
+    cmtype: "page",
+    format: "json",
+  });
+
+  if (cmcontinue) {
+    params.append("cmcontinue", cmcontinue);
+  }
+
+  try {
+    const response = await fetch(`${JUSTAPEDIA_API}?${params.toString()}`, {
+      headers: DEFAULT_HEADERS,
+      cache: "no-store",
+    });
+
+    if (!response.ok) return { members: [] };
+
+    const data = await response.json();
+    const membersList = data?.query?.categorymembers || [];
+    const nextContinue = data?.continue?.cmcontinue;
+
+    const titles = membersList.map((m: any) => m.title as string);
+    return {
+      members: titles,
+      cmcontinue: nextContinue,
+    };
+  } catch {
+    return { members: [] };
+  }
+}

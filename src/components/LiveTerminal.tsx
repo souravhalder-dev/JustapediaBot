@@ -56,6 +56,14 @@ export function LiveTerminal({
   const filteredLogs = botState.logs.filter((log) => {
     if (filterLevel === "all") return true;
     if (filterLevel === "edits") return log.articleTitle || log.diffUrl;
+    if (filterLevel === "rescues") {
+      return (
+        log.message.includes("Rescued") ||
+        log.message.includes("Repaired") ||
+        log.message.includes("SAVE SUCCESS") ||
+        log.level === "success"
+      );
+    }
     return log.level === filterLevel;
   });
 
@@ -204,13 +212,43 @@ export function LiveTerminal({
           </div>
         </div>
 
+        {/* IABot Operational Metrics Strip (InternetBot only) */}
+        {bot.id === "internet-bot" && botState.detailedStats && (
+          <div className="px-4 py-2 bg-slate-950 border-b border-slate-900 grid grid-cols-3 sm:grid-cols-6 gap-2 text-[11px] font-mono">
+            <div className="flex items-center gap-1.5">
+              <span className="text-slate-500">Checked:</span>
+              <span className="text-white font-bold">{botState.detailedStats.referencesChecked}</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="text-rose-400">Dead:</span>
+              <span className="text-rose-300 font-bold">{botState.detailedStats.deadLinksDetected}</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="text-emerald-400">Rescued:</span>
+              <span className="text-emerald-300 font-bold">{botState.detailedStats.archiveLinksAdded}</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="text-cyan-400">Repaired:</span>
+              <span className="text-cyan-300 font-bold">{botState.detailedStats.archiveLinksRepaired}</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="text-indigo-400">Snapshots:</span>
+              <span className="text-indigo-300 font-bold">{botState.detailedStats.newSnapshotsRequested}</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="text-amber-400">Tagged:</span>
+              <span className="text-amber-300 font-bold">{botState.detailedStats.unrecoverableLinksTagged}</span>
+            </div>
+          </div>
+        )}
+
         {/* Toolbar & Filter */}
         <div className="px-4 py-2 bg-slate-950 border-b border-slate-900 flex items-center justify-between gap-2 text-xs font-sans">
           <div className="flex items-center gap-1.5 overflow-x-auto py-0.5">
             <span className="text-slate-500 text-[11px] flex items-center gap-1 mr-1">
               <Filter className="w-3 h-3" /> Filter:
             </span>
-            {(["all", "edits", "success", "error", "auth", "cycle"] as const).map((lvl) => (
+            {(["all", "edits", "rescues", "success", "error", "auth", "cycle"] as const).map((lvl) => (
               <button
                 key={lvl}
                 onClick={() => setFilterLevel(lvl)}

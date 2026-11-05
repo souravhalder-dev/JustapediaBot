@@ -19,7 +19,7 @@ export async function POST(req: NextRequest) {
       sessionToken = body.session_token;
     }
 
-    const { botId, articleTitle, use_sandbox = false } = body;
+    const { botId, articleTitle, use_sandbox = false, options } = body;
 
     if (!botId || !articleTitle) {
       return NextResponse.json(
@@ -28,8 +28,8 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 1. Run the bot's genuine, specialized algorithm
-    const botResult = await executeBotFeature(botId, articleTitle);
+    // 1. Run the bot's genuine, specialized algorithm with options
+    const botResult = await executeBotFeature(botId, articleTitle, options);
 
     // 2. If no modifications needed, DO NOT touch or replace the page!
     if (!botResult.modified || !botResult.fixedWikitext) {
@@ -39,6 +39,7 @@ export async function POST(req: NextRequest) {
         title: articleTitle,
         botId,
         message: botResult.details,
+        stats: botResult.stats,
       });
     }
 
@@ -47,7 +48,7 @@ export async function POST(req: NextRequest) {
       const saveRes = await executeJustapediaEdit(sessionToken, {
         title: articleTitle,
         wikitext: botResult.fixedWikitext, // REAL WIKITEXT PRESERVED!
-        summary: botResult.summary || `Automated maintenance update via ${botId}`,
+        summary: botResult.summary || `InternetArchiveBot: Rescued references & preserved citations`,
         use_sandbox: Boolean(use_sandbox),
         is_minor: true,
         is_bot: true,
@@ -64,6 +65,7 @@ export async function POST(req: NextRequest) {
         editor: saveRes.editor,
         message: saveRes.success ? botResult.details : saveRes.message,
         changesCount: botResult.changesCount || 1,
+        stats: botResult.stats,
       });
     }
 
@@ -76,6 +78,7 @@ export async function POST(req: NextRequest) {
       botId,
       message: `${botResult.details} (Preview Mode — Sign in to save live to Justapedia)`,
       changesCount: botResult.changesCount || 1,
+      stats: botResult.stats,
     });
   } catch (error: any) {
     return NextResponse.json(

@@ -1,13 +1,113 @@
 const WAYBACK_AVAILABILITY_API = "https://archive.org/wayback/available";
-const USER_AGENT = "JustapediaArchiveBot/2.1 (https://justapedia.org; modern-web-client)";
+const WAYBACK_CDX_API = "https://web.archive.org/cdx/search/cdx";
+const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 (JustapediaIABot/2.5; +https://justapedia.org)";
 
 export interface WaybackSnapshot {
   available: boolean;
   url: string;
-  timestamp: string;
+  timestamp: string; // 14-digit timestamp e.g. "20180412153022"
   status: string;
+  originalUrl?: string;
 }
 
+export interface CDXRecord {
+  urlkey: string;
+  timestamp: string;
+  original: string;
+  mimetype: string;
+  statuscode: string;
+  digest: string;
+  length: string;
+}
+
+// In-memory set to prevent duplicate Save Page Now requests in a session
+const requestedArchiveUrls = new Set<string>();
+
+/**
+ * Parses any archive URL (Wayback Machine, Archive.today, WebCite) to extract original target URL and timestamp
+ */
+export function parseArchiveUrl(archiveUrl: string): {
+  isArchive: boolean;
+  service?: "wayback" | "archiveis" | "webcite" | "other";
+  timestamp?: string;
+  originalUrl?: string;
+} {
+  const trimmed = archiveUrl.trim();
+
+  // Wayback Machine: https://web.archive.org/web/20180412153022/http://example.com
+  const waybackMatch = trimmed.match(/^https?:\/\/web\.archive\.org\/web\/([0-9]{4,14})(?:[a-z_]+)?\/(https?:\/\/.+)$/i);
+  if (waybackMatch) {
+    return {
+      isArchive: true,
+      service: "wayback",
+      timestamp: waybackMatch[1].padEnd(14, "0"),
+      originalUrl: waybackMatch[2],
+    };
+  }
+
+  // Archive.today / archive.is / archive.ph
+  const archiveIsMatch = trimmed.match(/^https?:\/\/(?:archive\.(?:is|li|today|fo|md|ph)|yaot\.ee)\/(?:[0-9]{4}\.[0-9]{2}\.[0-9]{2}-[0-9]{6}\/)?(https?:\/\/.+)$/i);
+  if (archiveIsMatch) {
+    return {
+      isArchive: true,
+      service: "archiveis",
+      originalUrl: archiveIsMatch[1],
+    };
+  }
+
+  // WebCite: https://www.webcitation.org/query?url=... or /hash
+  if (trimmed.includes("webcitation.org")) {
+    const urlParam = trimmed.match(/[?&]url=([^&]+)/i);
+    return {
+      isArchive: true,
+      service: "webcite",
+      originalUrl: urlParam ? decodeURIComponent(urlParam[1]) : undefined,
+    };
+  }
+
+  if (trimmed.includes("web.archive.org")) {
+    return { isArchive: true, service: "wayback" };
+  }
+
+  return { isArchive: false };
+}
+
+/**
+ * Format 14-digit Wayback timestamp (e.g. 20180412153022) to readable date format: "YYYY-MM-DD"
+ */
+export function formatWaybackDate(timestamp: string): string {
+  const clean = timestamp.replace(/[^0-9]/g, "");
+  if (clean.length < 8) return "";
+  const year = clean.substring(0, 4);
+  const month = clean.substring(4, 6);
+  const day = clean.substring(6, 8);
+  return `${year}-${month}-${day}`;
+}
+
+/**
+ * Standardize timestamp to 14 digits (YYYYMMDDHHMMSS)
+ */
+export function normalizeTimestamp(rawDateOrTimestamp: string): string {
+  const digits = rawDateOrTimestamp.replace(/[^0-9]/g, "");
+  if (digits.length >= 14) return digits.substring(0, 14);
+  if (digits.length >= 8) return digits.substring(0, 8).padEnd(14, "0");
+
+  // Attempt parse from date string e.g. "April 12, 2018"
+  const parsed = Date.parse(rawDateOrTimestamp);
+  if (!isNaN(parsed)) {
+    const d = new Date(parsed);
+    const y = String(d.getUTCFullYear()).padStart(4, "0");
+    const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+    const day = String(d.getUTCDate()).padStart(2, "0");
+    return `${y}${m}${day}000000`;
+  }
+
+  return "";
+}
+
+/**
+ * Check Wayback availability using the fast /wayback/available endpoint
+ */
 export async function checkWaybackAvailability(url: string, timestamp?: string): Promise<WaybackSnapshot | null> {
   try {
     const params = new URLSearchParams({ url });
@@ -16,7 +116,10 @@ export async function checkWaybackAvailability(url: string, timestamp?: string):
     }
 
     const res = await fetch(`${WAYBACK_AVAILABILITY_API}?${params.toString()}`, {
-      headers: { "User-Agent": USER_AGENT },
+      headers: {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/json",
+      },
       cache: "no-store",
     });
 
@@ -30,44 +133,239 @@ export async function checkWaybackAvailability(url: string, timestamp?: string):
         available: true,
         url: snapshot.url.replace(/^http:\/\//i, "https://"),
         timestamp: snapshot.timestamp,
-        status: snapshot.status || "200",
+        status: String(snapshot.status || "200"),
+        originalUrl: url,
       };
     }
 
     return null;
   } catch (err) {
-    console.error(`Wayback availability check failed for ${url}:`, err);
     return null;
   }
 }
 
-export async function requestWaybackSave(url: string): Promise<{ success: boolean; saveUrl?: string; message: string }> {
+/**
+ * Search Wayback CDX Server API for comprehensive historical snapshots
+ * Matches Wikipedia IABot CDX querying capability
+ */
+export async function searchWaybackCDX(
+  url: string,
+  options?: {
+    from?: string;
+    to?: string;
+    limit?: number;
+    matchType?: "exact" | "prefix" | "host" | "domain";
+  }
+): Promise<CDXRecord[]> {
   try {
-    const saveUrl = `https://web.archive.org/save/${encodeURI(url)}`;
-    // We send a non-blocking request to the save endpoint
-    const res = await fetch(saveUrl, {
-      method: "GET",
-      headers: { "User-Agent": USER_AGENT },
+    const params = new URLSearchParams({
+      url,
+      output: "json",
+      fl: "urlkey,timestamp,original,mimetype,statuscode,digest,length",
+      filter: "statuscode:200", // Only accept valid 200 HTTP responses
+      collapse: "digest",      // Deduplicate identical captures
+      limit: String(options?.limit || 15),
     });
 
-    if (res.ok || res.status === 302) {
+    if (options?.from) params.append("from", options.from);
+    if (options?.to) params.append("to", options.to);
+    if (options?.matchType) params.append("matchType", options.matchType);
+
+    const res = await fetch(`${WAYBACK_CDX_API}?${params.toString()}`, {
+      headers: {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/json",
+      },
+      cache: "no-store",
+    });
+
+    if (!res.ok) return [];
+
+    const data = await res.json();
+    if (!Array.isArray(data) || data.length <= 1) return [];
+
+    // First row is header: ["urlkey","timestamp","original","mimetype","statuscode","digest","length"]
+    const rows = data.slice(1);
+    return rows.map((r: any[]) => ({
+      urlkey: r[0],
+      timestamp: r[1],
+      original: r[2],
+      mimetype: r[3],
+      statuscode: r[4],
+      digest: r[5],
+      length: r[6],
+    }));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Find the optimal historical snapshot for a URL:
+ * 1. If preferredDate/accessDate given: find closest valid snapshot in CDX.
+ * 2. Fall back to fast availability API.
+ */
+export async function findBestWaybackSnapshot(
+  url: string,
+  preferredDate?: string
+): Promise<WaybackSnapshot | null> {
+  const normTargetTimestamp = preferredDate ? normalizeTimestamp(preferredDate) : "";
+
+  // 1. Try CDX query first if a date preference exists
+  if (normTargetTimestamp) {
+    const cdxRecords = await searchWaybackCDX(url, { limit: 20 });
+    if (cdxRecords.length > 0) {
+      // Find record with minimum absolute difference from target timestamp
+      const targetNum = parseInt(normTargetTimestamp.substring(0, 8), 10);
+      let bestRecord = cdxRecords[0];
+      let smallestDiff = Infinity;
+
+      for (const rec of cdxRecords) {
+        const recNum = parseInt(rec.timestamp.substring(0, 8), 10);
+        const diff = Math.abs(recNum - targetNum);
+        if (diff < smallestDiff) {
+          smallestDiff = diff;
+          bestRecord = rec;
+        }
+      }
+
+      if (bestRecord) {
+        const snapshotUrl = `https://web.archive.org/web/${bestRecord.timestamp}/${bestRecord.original}`;
+        return {
+          available: true,
+          url: snapshotUrl,
+          timestamp: bestRecord.timestamp,
+          status: bestRecord.statuscode,
+          originalUrl: bestRecord.original,
+        };
+      }
+    }
+  }
+
+  // 2. Query availability API with target date or latest
+  const fastSnapshot = await checkWaybackAvailability(url, normTargetTimestamp || undefined);
+  if (fastSnapshot && fastSnapshot.available) {
+    return fastSnapshot;
+  }
+
+  // 3. Fallback CDX search without date filter
+  const fallbackCDX = await searchWaybackCDX(url, { limit: 5 });
+  if (fallbackCDX.length > 0) {
+    const latest = fallbackCDX[fallbackCDX.length - 1];
+    return {
+      available: true,
+      url: `https://web.archive.org/web/${latest.timestamp}/${latest.original}`,
+      timestamp: latest.timestamp,
+      status: latest.statuscode,
+      originalUrl: latest.original,
+    };
+  }
+
+  return null;
+}
+
+/**
+ * Validate an archive snapshot to ensure it is alive and not a broken archive redirect
+ */
+export async function validateArchiveSnapshot(snapshotUrl: string): Promise<boolean> {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3500);
+
+    const res = await fetch(snapshotUrl, {
+      method: "HEAD",
+      headers: { "User-Agent": USER_AGENT },
+      signal: controller.signal,
+      redirect: "follow",
+    });
+    clearTimeout(timer);
+
+    return res.status === 200;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Repair a broken or malformed Wayback Machine URL by finding a healthy replacement snapshot
+ */
+export async function repairBrokenArchiveUrl(
+  brokenArchiveUrl: string,
+  originalUrlFallback?: string
+): Promise<WaybackSnapshot | null> {
+  const parsed = parseArchiveUrl(brokenArchiveUrl);
+  const targetUrl = parsed.originalUrl || originalUrlFallback;
+
+  if (!targetUrl) return null;
+
+  // Search CDX for alternative valid snapshots
+  const records = await searchWaybackCDX(targetUrl, { limit: 10 });
+  if (records.length === 0) return null;
+
+  // Pick the newest valid snapshot
+  const best = records[records.length - 1];
+  const newArchiveUrl = `https://web.archive.org/web/${best.timestamp}/${best.original}`;
+
+  // If identical to the broken URL, it's not a repair
+  if (newArchiveUrl === brokenArchiveUrl) return null;
+
+  return {
+    available: true,
+    url: newArchiveUrl,
+    timestamp: best.timestamp,
+    status: best.statuscode,
+    originalUrl: best.original,
+  };
+}
+
+/**
+ * Submit URL to Wayback Save Page Now to archive working references
+ */
+export async function requestWaybackSave(url: string): Promise<{ success: boolean; saveUrl: string; message: string }> {
+  const saveUrl = `https://web.archive.org/save/${encodeURI(url)}`;
+
+  if (requestedArchiveUrls.has(url)) {
+    return {
+      success: true,
+      saveUrl,
+      message: "URL was already submitted to Wayback Machine in this session.",
+    };
+  }
+
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
+
+    const res = await fetch(saveUrl, {
+      method: "GET",
+      headers: {
+        "User-Agent": USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      },
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+
+    requestedArchiveUrls.add(url);
+
+    if (res.ok || res.status === 302 || res.status === 200) {
       return {
         success: true,
         saveUrl,
-        message: "Successfully submitted URL to the Wayback Machine for immediate archival.",
+        message: "Successfully queued URL on the Wayback Machine Save Page Now service.",
       };
     }
 
     return {
       success: false,
       saveUrl,
-      message: `Wayback Machine returned HTTP ${res.status}. You can save it manually at ${saveUrl}`,
+      message: `Wayback returned HTTP ${res.status}.`,
     };
   } catch (err: any) {
     return {
       success: false,
-      saveUrl: `https://web.archive.org/save/${encodeURI(url)}`,
-      message: `Request error: ${err.message}`,
+      saveUrl,
+      message: `Save request note: ${err.message}`,
     };
   }
 }

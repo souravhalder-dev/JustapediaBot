@@ -10,9 +10,13 @@ export const AVAILABLE_BOTS: BotDefinition[] = [
     description: "Crawls Justapedia pages, detects 404 dead external links, queries the Wayback Machine API, and patches citations with verified web archive snapshots.",
     category: "Citation & Links",
     capabilities: [
-      "Dead link detection & verification",
-      "Wayback Machine snapshot extraction",
-      "Template:cite_web / {{webarchive}} auto-patching",
+      "Dead link detection (404/410/DNS/soft-404)",
+      "Wayback CDX date proximity archive search & rescue",
+      "Auto-patching {{cite web}}, {{cite news}}, etc. with archive-url",
+      "Broken / corrupted archive link repair via CDX",
+      "Unrecoverable dead link tagging with {{dead link}}",
+      "Proactive Wayback Save Page Now for live references",
+      "Category crawling (e.g. Category:All articles with dead external links)",
       "High-speed 100 edits/min pacing with 60s auto-cooldown",
     ],
     defaultConfig: {
@@ -147,5 +151,16 @@ export function createInitialBotState(botId: string): BotState {
     processedCount: 0,
     successCount: 0,
     errorCount: 0,
+    detailedStats: {
+      articlesProcessed: 0,
+      referencesChecked: 0,
+      deadLinksDetected: 0,
+      archiveLinksAdded: 0,
+      archiveLinksRepaired: 0,
+      newSnapshotsRequested: 0,
+      unrecoverableLinksTagged: 0,
+      articlesModified: 0,
+      failedOperations: 0,
+    },
   };
 }
