@@ -1,4 +1,5 @@
 import { fetchJustapediaPage } from "./justapedia";
+import { formatAmericanDate } from "./wayback";
 import { processArticleWithIABot, IABotRunOptions, IABotStats } from "./iabot-engine";
 
 export interface BotActionResult {
@@ -135,7 +136,8 @@ export async function runCitationVerifierBotOnArticle(title: string): Promise<Bo
     } catch {
       // ignore
     }
-    return `<ref>{{cite web |url=${url} |title=Source from ${domain} |website=${domain}}}</ref>`;
+    const accessDate = formatAmericanDate();
+    return `<ref>{{cite web |url=${url} |title=Source from ${domain} |website=${domain} |access-date=${accessDate}}}</ref>`;
   });
 
   // Match [https://example.com Title] inside <ref>
@@ -148,7 +150,8 @@ export async function runCitationVerifierBotOnArticle(title: string): Promise<Bo
     } catch {
       // ignore
     }
-    return `<ref>{{cite web |url=${url} |title=${linkTitle.trim()} |website=${domain}}}</ref>`;
+    const accessDate = formatAmericanDate();
+    return `<ref>{{cite web |url=${url} |title=${linkTitle.trim()} |website=${domain} |access-date=${accessDate}}}</ref>`;
   });
 
   if (count === 0 || updatedWikitext === originalWikitext) {

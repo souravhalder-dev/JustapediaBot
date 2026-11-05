@@ -80,21 +80,22 @@ export const MONTH_NAMES = [
 /**
  * Detect the date style of an existing citation parameter or sample string
  * Supports Month D, YYYY (MDY), D Month YYYY (DMY), and ISO YYYY-MM-DD
+ * Defaults to the American format (Month Day, Year) supported by Template:Cite web
  */
 export function detectDateFormat(sample?: string): "MDY" | "DMY" | "ISO" {
-  if (!sample || typeof sample !== "string") return "ISO";
+  if (!sample || typeof sample !== "string") return "MDY";
   const s = sample.trim();
 
   // Corrupted merged date check: e.g. "2013-05-14 24, 2019" -> MDY
   if (/^\d{4}-\d{2}-\d{2}\s+\d{1,2},\s*\d{4}$/.test(s)) return "MDY";
 
-  // MDY: "June 24, 2019" or "June 24 2019"
+  // MDY: "June 24, 2019", "November 5, 2026" or "June 24 2019"
   if (/^[A-Za-z]+\s+\d{1,2},?\s+\d{4}$/.test(s)) return "MDY";
 
-  // DMY: "24 June 2019"
+  // DMY: "24 June 2019", "5 November 2026"
   if (/^\d{1,2}\s+[A-Za-z]+\s+\d{4}$/.test(s)) return "DMY";
 
-  // ISO: "2019-06-24"
+  // ISO: "2019-06-24", "2026-11-05"
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return "ISO";
 
   // Check if any English month name is present
@@ -104,13 +105,14 @@ export function detectDateFormat(sample?: string): "MDY" | "DMY" | "ISO" {
     return "MDY";
   }
 
-  return "ISO";
+  // Default to American format (e.g. November 5, 2026) for Template:Cite web
+  return "MDY";
 }
 
 /**
  * Format 14-digit Wayback timestamp (e.g. 20180412153022) or ISO date to standard citation date format.
- * Matches the citation's existing date style (MDY "Month D, YYYY", DMY "D Month YYYY", or ISO "YYYY-MM-DD")
- * as prescribed by Wikipedia & Justapedia Template:Cite web / CS1 guidelines.
+ * Defaults to the American format (MDY "Month Day, Year", e.g. "November 5, 2026")
+ * supported by Justapedia Template:Cite web / CS1 guidelines.
  */
 export function formatWaybackDate(timestamp: string, sampleDate?: string): string {
   const clean = String(timestamp).replace(/[^0-9]/g, "");
@@ -127,13 +129,79 @@ export function formatWaybackDate(timestamp: string, sampleDate?: string): strin
   const isoDate = `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 
   const style = detectDateFormat(sampleDate);
-  if (style === "MDY") {
-    return `${monthName} ${day}, ${year}`;
-  }
   if (style === "DMY") {
     return `${day} ${monthName} ${year}`;
   }
-  return isoDate;
+  if (style === "ISO") {
+    return isoDate;
+  }
+  // American format: "Month Day, Year" (e.g. "November 5, 2026" / "May 14, 2013")
+  return `${monthName} ${day}, ${year}`;
+}
+
+/**
+ * Formats a Date object, timestamp, or date string into the American format:
+ * "Month Day, Year" (e.g. "November 5, 2026") as required by Template:Cite web
+ */
+export function formatAmericanDate(d?: Date | string): string {
+  if (!d) {
+    const now = new Date();
+    return `${MONTH_NAMES[now.getUTCMonth()]} ${now.getUTCDate()}, ${now.getUTCFullYear()}`;
+  }
+
+  if (typeof d === "string") {
+    const s = d.trim();
+    // 1. Check Month D, YYYY
+    const mdyMatch = s.match(/^([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})$/);
+    if (mdyMatch) {
+      const monthInput = mdyMatch[1];
+      const monthIdx = MONTH_NAMES.findIndex((m) =>
+        m.toLowerCase().startsWith(monthInput.toLowerCase().substring(0, 3))
+      );
+      const monthName = monthIdx !== -1 ? MONTH_NAMES[monthIdx] : monthInput;
+      const day = parseInt(mdyMatch[2], 10);
+      const year = mdyMatch[3];
+      return `${monthName} ${day}, ${year}`;
+    }
+
+    // 2. Check D Month YYYY
+    const dmyMatch = s.match(/^(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})$/);
+    if (dmyMatch) {
+      const day = parseInt(dmyMatch[1], 10);
+      const monthInput = dmyMatch[2];
+      const monthIdx = MONTH_NAMES.findIndex((m) =>
+        m.toLowerCase().startsWith(monthInput.toLowerCase().substring(0, 3))
+      );
+      const monthName = monthIdx !== -1 ? MONTH_NAMES[monthIdx] : monthInput;
+      const year = dmyMatch[3];
+      return `${monthName} ${day}, ${year}`;
+    }
+
+    // 3. Check ISO YYYY-MM-DD
+    const isoMatch = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+    if (isoMatch) {
+      const year = isoMatch[1];
+      const monthIdx = parseInt(isoMatch[2], 10) - 1;
+      const day = parseInt(isoMatch[3], 10);
+      const monthName = MONTH_NAMES[monthIdx] || "January";
+      return `${monthName} ${day}, ${year}`;
+    }
+
+    // 4. Digits only (Wayback timestamp e.g. 20261105120000)
+    const digits = s.replace(/[^0-9]/g, "");
+    if (digits.length >= 8) {
+      const year = digits.substring(0, 4);
+      const monthIdx = parseInt(digits.substring(4, 6), 10) - 1;
+      const day = parseInt(digits.substring(6, 8), 10);
+      const monthName = MONTH_NAMES[monthIdx] || "January";
+      return `${monthName} ${day}, ${year}`;
+    }
+  } else if (d instanceof Date && !isNaN(d.getTime())) {
+    return `${MONTH_NAMES[d.getUTCMonth()]} ${d.getUTCDate()}, ${d.getUTCFullYear()}`;
+  }
+
+  const fallback = new Date();
+  return `${MONTH_NAMES[fallback.getUTCMonth()]} ${fallback.getUTCDate()}, ${fallback.getUTCFullYear()}`;
 }
 
 /**

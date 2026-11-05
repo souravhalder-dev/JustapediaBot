@@ -1,9 +1,13 @@
 import { extractDomain } from "./utils";
-import { parseArchiveUrl, formatWaybackDate } from "./wayback";
+import { parseArchiveUrl, formatWaybackDate, formatAmericanDate } from "./wayback";
 import { ExtractedLink } from "./types";
 
 export function formatArchiveDate(timestamp: string, sampleDate?: string): string {
   return formatWaybackDate(timestamp, sampleDate);
+}
+
+export function formatAccessDate(d?: Date | string): string {
+  return formatAmericanDate(d);
 }
 
 export function generateFixedWikitext(
@@ -323,7 +327,8 @@ export function patchCitationTemplate(
   template: CitationTemplate,
   archiveUrl: string,
   archiveDate: string,
-  urlStatus: "dead" | "live" | "unfit" | "usurped" = "dead"
+  urlStatus: "dead" | "live" | "unfit" | "usurped" = "dead",
+  accessDate?: string
 ): string {
   let text = template.rawString;
   const sp = typeof template.paramSpacing === "string" ? template.paramSpacing : " ";
@@ -340,7 +345,7 @@ export function patchCitationTemplate(
     template.citationDate ||
     template.accessDate;
 
-  // Format date to match template's style (MDY, DMY, or ISO)
+  // Format date to match template's style (MDY "Month Day, Year", DMY, or ISO)
   const formattedDate = formatWaybackDate(archiveDate, sample) || archiveDate;
 
   const normalizeP1 = (p1: string): string => {
@@ -386,6 +391,18 @@ export function patchCitationTemplate(
     text = text.replace(deadUrlRegex, (_m, p1) => `${normalizeP1(p1)}${urlStatus === "dead" ? "yes" : "no"}`);
   } else {
     text = injectParam(text, "url-status", urlStatus);
+  }
+
+  // 4. Handle access-date in American format: "Month Day, Year" (e.g. November 5, 2026)
+  const targetAccessDate = accessDate || template.params["access-date"] || template.params["accessdate"];
+  if (targetAccessDate) {
+    const formattedAccessDate = formatAmericanDate(targetAccessDate);
+    const accessDateRegex = /(\|\s*(?:access-?date|accessdate)[ \t]*=[ \t]*)([\s\S]*?)(?=[ \t]*(?:[|}]))/i;
+    if (accessDateRegex.test(text)) {
+      text = text.replace(accessDateRegex, (_m, p1) => `${normalizeP1(p1)}${formattedAccessDate}`);
+    } else if (accessDate) {
+      text = injectParam(text, "access-date", formattedAccessDate);
+    }
   }
 
   return text;
