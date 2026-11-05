@@ -1,6 +1,15 @@
-app/src/deadlink.config.local.inc.php
-app/src/memory/runfiles/*
-!app/src/memory/runfiles/.gitkeep
+# Next.js
+.next/
+out/
+build/
+node_modules/
+*.tsbuildinfo
+next-env.d.ts
+
+# Legacy PHP
+legacy-php-app/src/deadlink.config.local.inc.php
+legacy-php-app/src/memory/runfiles/*
+!legacy-php-app/src/memory/runfiles/.gitkeep
 vendor/*
 !vendor/.gitkeep
 /mariadb/
@@ -8,12 +17,14 @@ vendor/*
 .DS_Store
 *.xlsx
 php.ini
+cacert.pem
+composer.phar
 **/.ai/
 **/.idea/
-app/src/Wikitext
+legacy-php-app/src/Wikitext
 **/*[Ss]tat*.php
-!app/src/statGen.php
+!legacy-php-app/src/statGen.php
 **/*.tsv
 
 # statGen.php revision samples
-app/src/revision_samples/
+legacy-php-app/src/revision_samples/

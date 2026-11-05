@@ -1,0 +1,37 @@
+{
+  "$schema": "/toolinfo/1.2.2",
+  "$language": "en",
+  "name": "justapedia-iabot",
+  "title": "Justapedia IABot Management Interface",
+  "subtitle": "Find and replace dead links on Justapedia articles",
+  "description": "InternetArchiveBot customized exclusively for Justapedia to identify and replace broken external links. Use this interface to run the bot on Justapedia pages, or to configure its operation.",
+  "keywords": "justapedia, iabot, internetarchivebot, management, interface, linkrot, bot, dead, link, fixing, external links",
+  "version": "2.0.9.6",
+  "author": [
+	{"wiki_username": "Cyberpower678"},
+	{"wiki_username": "Harej"},
+	{"wiki_username": "GreenC"}
+  ],
+  "url": "https://justapedia.org",
+  "repository": "https://github.com/internetarchive/internetarchivebot",
+  "bot_username": "JustapediaIABot",
+  "deprecated": false,
+  "experimental": false,
+  "for_wikis": "justapedia",
+  "icon": "https://justapedia.org/resources/assets/favicon.ico",
+  "license": "AGPL-3.0-or-later",
+  "sponsor": "Justapedia",
+  "available_ui_languages": "*",
+  "technology_used": [
+	"PHP",
+	"Composer"
+  ],
+  "tool_type": "web app",
+  "api_url": "https://justapedia.org/api.php",
+  "developer_docs_url": "https://justapedia.org/Justapedia:InternetArchiveBot",
+  "user_docs_url": "https://justapedia.org/Justapedia:InternetArchiveBot",
+  "feedback_url": "https://justapedia.org/Justapedia_talk:Bots",
+  "privacy_policy_url": "",
+  "translate_url": "",
+  "bugtracker_url": "https://justapedia.org/Justapedia_talk:Bots"
+}
