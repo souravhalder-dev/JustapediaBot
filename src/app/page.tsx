@@ -45,6 +45,10 @@ export default function BotDashboardPage() {
   const [loginError, setLoginError] = useState<string | null>(null);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
 
+  // Restore Grace Hopper state
+  const [restoringArticle, setRestoringArticle] = useState(false);
+  const [restoreMessage, setRestoreMessage] = useState<string | null>(null);
+
   // Multi-bot state dictionary
   const [botStates, setBotStates] = useState<Record<string, BotState>>(() => {
     const initial: Record<string, BotState> = {};
@@ -105,6 +109,35 @@ export default function BotDashboardPage() {
 
     if (!res.success) {
       setLoginError(res.message || "Failed to log in to Justapedia.");
+    }
+  };
+
+  const handleRestoreGraceHopper = async () => {
+    if (!sessionToken) return;
+    setRestoringArticle(true);
+    setRestoreMessage(null);
+    try {
+      const res = await fetch("/api/bot/restore-article", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${sessionToken}`,
+        },
+        body: JSON.stringify({
+          title: "Grace Hopper",
+          revid: 2000019960,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setRestoreMessage(`Successfully restored "Grace Hopper" to original revision by Shahadat (rev #${data.revid || "latest"})!`);
+      } else {
+        setRestoreMessage(`Failed to restore: ${data.message}`);
+      }
+    } catch (err: any) {
+      setRestoreMessage(`Error restoring article: ${err.message}`);
+    } finally {
+      setRestoringArticle(false);
     }
   };
 
@@ -183,18 +216,18 @@ export default function BotDashboardPage() {
     addLog(botId, {
       timestamp: new Date().toLocaleTimeString(),
       level: "info",
-      message: `Starting high-speed cycle #1: 100 edits/min target pace. Sandbox Mode: ${useSandbox ? "ENABLED (Justapedia:Sandbox)" : "LIVE PUBLISH"}.`,
+      message: `Starting ${botDef.name}: Executing bot's genuine features. Target pacing: up to 100 edits/min. Mode: ${useSandbox ? "SANDBOX (Safe Testing)" : "LIVE PAGE PUBLISH"}.`,
     });
 
     if (user) {
       addLog(botId, {
         timestamp: new Date().toLocaleTimeString(),
         level: "auth",
-        message: `Authenticated as @${user.username}. All edits will be attributed to your Justapedia account.`,
+        message: `Authenticated as @${user.username}. All edits will appear on your Special:Contributions history.`,
       });
     }
 
-    // High-speed pace: 1 edit every ~600ms = 100 edits/minute
+    // High-speed pace: 1 check/edit every ~600ms = 100 operations/minute
     runIntervals.current[botId] = setInterval(() => {
       processNextEdit(botId);
     }, 600);
@@ -266,7 +299,7 @@ export default function BotDashboardPage() {
   };
 
   // Process single edit in queue
-  const processNextEdit = async (botId: string) => {
+  const processNextEdit = (botId: string) => {
     setBotStates((prev) => {
       const currentState = prev[botId];
       if (!currentState || currentState.status !== "ON" || currentState.isCooldown) {
@@ -279,79 +312,122 @@ export default function BotDashboardPage() {
       const articleTitle = queue.shift()!;
       queue.push(articleTitle);
 
-      const nextCycleCount = currentState.currentCycleEdits + 1;
-      const nextTotalEdits = currentState.totalEdits + 1;
-      const nextSuccess = currentState.successCount + 1;
-
-      if (nextCycleCount >= 100) {
-        setTimeout(() => triggerCooldown(botId), 50);
-      }
-
-      executeBotAction(botId, articleTitle, nextTotalEdits);
+      executeBotAction(botId, articleTitle, currentState.currentCycleEdits + 1);
 
       return {
         ...prev,
         [botId]: {
           ...currentState,
           articleQueue: queue,
-          currentCycleEdits: nextCycleCount,
-          totalEdits: nextTotalEdits,
-          sessionEdits: currentState.sessionEdits + 1,
-          processedCount: currentState.processedCount + 1,
-          successCount: nextSuccess,
-          lastArticleProcessed: articleTitle,
-          lastEditTimestamp: new Date().toLocaleTimeString(),
         },
       };
     });
   };
 
-  const executeBotAction = async (botId: string, articleTitle: string, editNumber: number) => {
+  // Perform genuine bot action via dedicated feature engine
+  const executeBotAction = async (botId: string, articleTitle: string, cycleEditIdx: number) => {
     const timestamp = new Date().toLocaleTimeString();
 
-    if (sessionToken && user) {
-      try {
-        const dummyWikitext = `== Preservation Update ==\n* Checked by Justapedia Bot Suite (${botId}) on ${new Date().toISOString()}\n* Status: Verified reference integrity and link health.`;
-        const res = await fetch("/api/bot/save-edit", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${sessionToken}`,
-          },
-          body: JSON.stringify({
-            title: articleTitle,
-            wikitext: dummyWikitext,
-            summary: `Automated maintenance update via ${botId} [Cycle edit #${editNumber}]`,
-            use_sandbox: useSandbox,
-          }),
-        });
+    try {
+      const res = await fetch("/api/bot/execute-step", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}),
+        },
+        body: JSON.stringify({
+          botId,
+          articleTitle,
+          use_sandbox: useSandbox,
+        }),
+      });
 
-        const data = await res.json();
-        if (data.success) {
-          addLog(botId, {
-            timestamp,
-            level: "success",
-            articleTitle,
-            diffUrl: data.diff_url,
-            revid: data.revid,
-            message: `[SAVE SUCCESS] Saved to Justapedia under account "${data.editor}". Rev #${data.revid || 1000 + editNumber}.`,
-          });
-        } else {
-          addLog(botId, {
-            timestamp,
-            level: "error",
-            articleTitle,
-            message: `[SAVE FAILED] ${data.message || "Failed to save to Justapedia"}`,
-          });
-        }
-      } catch (err: any) {
+      const data = await res.json();
+
+      if (!data.success) {
         addLog(botId, {
           timestamp,
           level: "error",
           articleTitle,
-          message: `Network error during save: ${err.message}`,
+          message: `[ERROR] ${data.message || "Failed to execute bot action"}`,
         });
+        setBotStates((prev) => ({
+          ...prev,
+          [botId]: {
+            ...prev[botId],
+            errorCount: prev[botId].errorCount + 1,
+            lastArticleProcessed: articleTitle,
+            lastEditTimestamp: timestamp,
+          },
+        }));
+        return;
       }
+
+      if (data.modified && data.saved) {
+        // Genuine modification was saved to Justapedia
+        addLog(botId, {
+          timestamp,
+          level: "success",
+          articleTitle,
+          diffUrl: data.diff_url,
+          revid: data.revid,
+          message: `[SAVE SUCCESS] ${data.message} (rev #${data.revid || "live"}) by @${data.editor || user?.username}`,
+        });
+
+        setBotStates((prev) => {
+          const s = prev[botId];
+          const nextCycle = s.currentCycleEdits + 1;
+          if (nextCycle >= 100) {
+            setTimeout(() => triggerCooldown(botId), 50);
+          }
+          return {
+            ...prev,
+            [botId]: {
+              ...s,
+              totalEdits: s.totalEdits + 1,
+              sessionEdits: s.sessionEdits + 1,
+              currentCycleEdits: nextCycle,
+              successCount: s.successCount + 1,
+              lastArticleProcessed: articleTitle,
+              lastEditTimestamp: timestamp,
+            },
+          };
+        });
+      } else {
+        // No modifications needed, article is already healthy and accurate
+        addLog(botId, {
+          timestamp,
+          level: "info",
+          articleTitle,
+          message: `[VERIFIED] ${data.message}`,
+        });
+
+        setBotStates((prev) => ({
+          ...prev,
+          [botId]: {
+            ...prev[botId],
+            processedCount: prev[botId].processedCount + 1,
+            lastArticleProcessed: articleTitle,
+            lastEditTimestamp: timestamp,
+          },
+        }));
+      }
+    } catch (err: any) {
+      addLog(botId, {
+        timestamp,
+        level: "error",
+        articleTitle,
+        message: `Network error during step execution: ${err.message}`,
+      });
+      setBotStates((prev) => ({
+        ...prev,
+        [botId]: {
+          ...prev[botId],
+          errorCount: prev[botId].errorCount + 1,
+          lastArticleProcessed: articleTitle,
+          lastEditTimestamp: timestamp,
+        },
+      }));
     }
   };
 
@@ -544,6 +620,30 @@ export default function BotDashboardPage() {
 
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 relative z-10">
           
+          {/* Emergency Restore Banner if Needed */}
+          <div className="mb-6 p-4 rounded-xl bg-indigo-950/40 border border-indigo-500/30 flex flex-wrap items-center justify-between gap-3 text-xs">
+            <div className="flex items-center gap-2.5 text-indigo-200">
+              <RotateCcw className="w-4 h-4 text-indigo-400 flex-shrink-0" />
+              <span>
+                <strong>Article Integrity Guard:</strong> Bots will only modify pages when genuine citations or infoboxes require repair. Need to restore Grace Hopper to original revision?
+              </span>
+            </div>
+            <button
+              onClick={handleRestoreGraceHopper}
+              disabled={restoringArticle}
+              className="px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-semibold shadow-sm transition disabled:opacity-50"
+            >
+              {restoringArticle ? "Restoring..." : "Restore Grace Hopper (rev #2000019960)"}
+            </button>
+          </div>
+
+          {restoreMessage && (
+            <div className="mb-6 p-3 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-xs flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+              <span>{restoreMessage}</span>
+            </div>
+          )}
+
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 mb-8">
             <div>
               <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-indigo-500/10 border border-indigo-500/20 text-indigo-300 text-xs font-medium mb-3">
@@ -806,7 +906,7 @@ export default function BotDashboardPage() {
                       </div>
 
                       <div className="flex items-center justify-between text-[11px] text-slate-500 mt-2">
-                        <span>Pacing: 100 edits/min (~600ms/edit)</span>
+                        <span>Pacing: 100 edits/min (~600ms/operation)</span>
                         {isPaused ? (
                           <span className="text-amber-400 font-semibold animate-pulse">
                             Cooldown: {state.cooldownRemainingSeconds}s remaining
@@ -819,11 +919,11 @@ export default function BotDashboardPage() {
 
                     {/* Stats summary */}
                     <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800/80 flex flex-col justify-between">
-                      <span className="text-xs text-slate-400">Total Lifetime Saves</span>
+                      <span className="text-xs text-slate-400">Total Valid Saves</span>
                       <div className="flex items-baseline gap-2 mt-1">
                         <span className="text-2xl font-extrabold text-white font-mono">{state.totalEdits}</span>
                         <span className="text-xs text-emerald-400 font-mono font-medium">
-                          ({state.successCount} ok)
+                          ({state.processedCount} checked)
                         </span>
                       </div>
                       <span className="text-[11px] text-slate-500 mt-1">
@@ -846,7 +946,7 @@ export default function BotDashboardPage() {
                             <ExternalLink className="w-3 h-3 flex-shrink-0" />
                           </a>
                         ) : (
-                          <span className="text-xs text-slate-500 italic">No edits processed yet</span>
+                          <span className="text-xs text-slate-500 italic">No operations processed yet</span>
                         )}
                       </div>
                       <span className="text-[11px] text-slate-500 mt-1">
