@@ -1,34 +1,19 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
 import { 
-  ShieldCheck, 
-  Search, 
+  Bot, 
   ExternalLink, 
-  Layers, 
-  Settings2, 
-  Activity, 
-  Globe2, 
-  BookOpen,
-  User,
-  LogIn,
-  History,
-  Bot
+  LogIn, 
+  LogOut, 
+  History, 
+  BookOpen, 
+  ShieldCheck 
 } from "lucide-react";
 
 export function Navbar() {
-  const pathname = usePathname();
-  const { user, openAuthModal, isLoading } = useAuth();
-
-  const navLinks = [
-    { name: "Bot Dashboard", href: "/", icon: Activity },
-    { name: "Page Analyzer", href: "/analyzer", icon: Layers },
-    { name: "URL Inspector", href: "/inspector", icon: Search },
-    { name: "Domains & Rules", href: "/domains", icon: Globe2 },
-    { name: "Settings", href: "/settings", icon: Settings2 },
-  ];
+  const { user, openAuthModal, logout, isLoading } = useAuth();
 
   return (
     <header className="sticky top-0 z-40 backdrop-blur-md bg-slate-900/90 border-b border-slate-800 text-white shadow-sm">
@@ -50,32 +35,10 @@ export function Navbar() {
                     Bot Suite
                   </span>
                 </div>
-                <p className="text-[11px] text-slate-400">MediaWiki 1.45.3 Automated Suite</p>
+                <p className="text-[11px] text-slate-400">MediaWiki 1.45.3 Automated Operations</p>
               </div>
             </Link>
           </div>
-
-          {/* Navigation Links - (Meta is completely removed!) */}
-          <nav className="hidden md:flex items-center gap-1">
-            {navLinks.map((item) => {
-              const Icon = item.icon;
-              const isActive = pathname === item.href;
-              return (
-                <Link
-                  key={item.href}
-                  href={item.href}
-                  className={`flex items-center gap-2 px-3.5 py-2 rounded-lg text-sm font-medium transition-all duration-150 ${
-                    isActive
-                      ? "bg-indigo-600/20 text-indigo-300 border border-indigo-500/30 shadow-inner"
-                      : "text-slate-300 hover:text-white hover:bg-slate-800/60"
-                  }`}
-                >
-                  <Icon className={`w-4 h-4 ${isActive ? "text-indigo-400" : "text-slate-400"}`} />
-                  {item.name}
-                </Link>
-              );
-            })}
-          </nav>
 
           {/* Right Status, User Profile & Wiki Shortcut */}
           <div className="flex items-center gap-2 sm:gap-3">
@@ -101,18 +64,26 @@ export function Navbar() {
                   href={user.userContributionsUrl || `https://justapedia.org/Special:Contributions/${user.username}`}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="hidden lg:flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium text-slate-300 bg-slate-800/60 hover:bg-slate-700 hover:text-white border border-slate-700 transition"
+                  className="hidden md:flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium text-slate-300 bg-slate-800/60 hover:bg-slate-700 hover:text-white border border-slate-700 transition"
                   title="View your Justapedia contribution history"
                 >
                   <History className="w-3.5 h-3.5 text-indigo-400" />
                   <span>Contributions</span>
                   <ExternalLink className="w-3 h-3 text-slate-400" />
                 </a>
+
+                <button
+                  onClick={logout}
+                  className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-slate-800 transition"
+                  title="Log out of Justapedia"
+                >
+                  <LogOut className="w-4 h-4" />
+                </button>
               </div>
             ) : (
               <button
                 onClick={openAuthModal}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-medium text-white shadow-md shadow-indigo-600/30 transition"
+                className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-medium text-white shadow-md shadow-indigo-600/30 transition"
               >
                 <LogIn className="w-3.5 h-3.5" />
                 <span>Log In</span>
@@ -128,7 +99,7 @@ export function Navbar() {
               title="Visit Justapedia Wiki"
             >
               <BookOpen className="w-3.5 h-3.5 text-indigo-400" />
-              <span>Justapedia</span>
+              <span>Justapedia.org</span>
               <ExternalLink className="w-3 h-3 text-slate-400" />
             </a>
 

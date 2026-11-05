@@ -2,7 +2,13 @@ import { SaveArticleRequest, SaveArticleResponse } from "./types";
 import { formatCookieHeader, verifyUserSession } from "./auth";
 
 const JUSTAPEDIA_API = "https://justapedia.org/api.php";
-const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 (JustapediaSaveEngine/2.0)";
+const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+
+const DEFAULT_HEADERS = {
+  "User-Agent": USER_AGENT,
+  "Accept": "application/json, text/plain, */*",
+  "Accept-Language": "en-US,en;q=0.9",
+};
 
 /**
  * Consistent Saving Mechanism matching the Birth Update Bot (justapedia_client.py)
@@ -67,8 +73,7 @@ export async function executeJustapediaEdit(
     const userinfoResp = await fetch(userinfoUrl, {
       method: "GET",
       headers: {
-        "User-Agent": USER_AGENT,
-        "Accept": "application/json",
+        ...DEFAULT_HEADERS,
         "Cookie": cookieHeader,
       },
       cache: "no-store",
@@ -110,8 +115,7 @@ export async function executeJustapediaEdit(
     const tokenResp = await fetch(tokenUrl, {
       method: "GET",
       headers: {
-        "User-Agent": USER_AGENT,
-        "Accept": "application/json",
+        ...DEFAULT_HEADERS,
         "Cookie": cookieHeader,
       },
       cache: "no-store",
@@ -155,8 +159,7 @@ export async function executeJustapediaEdit(
     const editResp = await fetch(JUSTAPEDIA_API, {
       method: "POST",
       headers: {
-        "User-Agent": USER_AGENT,
-        "Accept": "application/json",
+        ...DEFAULT_HEADERS,
         "Content-Type": "application/x-www-form-urlencoded",
         "Cookie": cookieHeader,
       },

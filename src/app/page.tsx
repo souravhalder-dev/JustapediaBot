@@ -23,17 +23,27 @@ import {
   Zap,
   RotateCcw,
   AlertTriangle,
-  ArrowRight,
   Sliders,
   Calendar,
   FileText,
   FolderKanban,
   Sparkles,
-  Info
+  User,
+  KeyRound,
+  Eye,
+  EyeOff,
+  Bot
 } from "lucide-react";
 
 export default function BotDashboardPage() {
-  const { user, sessionToken, openAuthModal } = useAuth();
+  const { user, sessionToken, login, isLoading: isAuthLoading } = useAuth();
+
+  // Login Gate state (when unauthenticated)
+  const [loginUsername, setLoginUsername] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
 
   // Multi-bot state dictionary
   const [botStates, setBotStates] = useState<Record<string, BotState>>(() => {
@@ -54,6 +64,24 @@ export default function BotDashboardPage() {
   const runIntervals = useRef<Record<string, NodeJS.Timeout | null>>({});
   const cooldownIntervals = useRef<Record<string, NodeJS.Timeout | null>>({});
 
+  // Stop all running bots if user logs out
+  useEffect(() => {
+    if (!user) {
+      Object.keys(runIntervals.current).forEach((id) => {
+        if (runIntervals.current[id]) {
+          clearInterval(runIntervals.current[id]!);
+          runIntervals.current[id] = null;
+        }
+      });
+      Object.keys(cooldownIntervals.current).forEach((id) => {
+        if (cooldownIntervals.current[id]) {
+          clearInterval(cooldownIntervals.current[id]!);
+          cooldownIntervals.current[id] = null;
+        }
+      });
+    }
+  }, [user]);
+
   // Clean up timers on unmount
   useEffect(() => {
     return () => {
@@ -61,6 +89,24 @@ export default function BotDashboardPage() {
       Object.values(cooldownIntervals.current).forEach((t) => t && clearInterval(t));
     };
   }, []);
+
+  const handleLoginSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoginError(null);
+
+    if (!loginUsername.trim() || !loginPassword.trim()) {
+      setLoginError("Please enter both your Justapedia username and password.");
+      return;
+    }
+
+    setIsLoggingIn(true);
+    const res = await login(loginUsername.trim(), loginPassword.trim());
+    setIsLoggingIn(false);
+
+    if (!res.success) {
+      setLoginError(res.message || "Failed to log in to Justapedia.");
+    }
+  };
 
   const addLog = (botId: string, log: Omit<BotTerminalLog, "id" | "botId">) => {
     const newLog: BotTerminalLog = {
@@ -76,7 +122,7 @@ export default function BotDashboardPage() {
         ...prev,
         [botId]: {
           ...state,
-          logs: [...state.logs.slice(-250), newLog], // Keep last 250 logs
+          logs: [...state.logs.slice(-250), newLog],
         },
       };
     });
@@ -88,10 +134,8 @@ export default function BotDashboardPage() {
     if (!currentState) return;
 
     if (currentState.status === "ON" || currentState.status === "PAUSED") {
-      // STOP BOT
       stopBot(botId);
     } else {
-      // START BOT
       startBot(botId);
     }
   };
@@ -148,12 +192,6 @@ export default function BotDashboardPage() {
         level: "auth",
         message: `Authenticated as @${user.username}. All edits will be attributed to your Justapedia account.`,
       });
-    } else {
-      addLog(botId, {
-        timestamp: new Date().toLocaleTimeString(),
-        level: "warn",
-        message: `Notice: Running in guest mode. Log in to attribute edits directly to your Justapedia contribution history.`,
-      });
     }
 
     // High-speed pace: 1 edit every ~600ms = 100 edits/minute
@@ -201,7 +239,7 @@ export default function BotDashboardPage() {
         clearInterval(cooldownIntervals.current[botId]!);
         cooldownIntervals.current[botId] = null;
 
-        // Auto-resume next cycle!
+        // Auto-resume next cycle
         setBotStates((prev) => ({
           ...prev,
           [botId]: {
@@ -238,20 +276,17 @@ export default function BotDashboardPage() {
       const queue = [...currentState.articleQueue];
       if (queue.length === 0) return prev;
 
-      // Pick article from queue
       const articleTitle = queue.shift()!;
-      queue.push(articleTitle); // cycle back to queue end
+      queue.push(articleTitle);
 
       const nextCycleCount = currentState.currentCycleEdits + 1;
       const nextTotalEdits = currentState.totalEdits + 1;
       const nextSuccess = currentState.successCount + 1;
 
-      // If burst reaches 100, schedule cooldown
       if (nextCycleCount >= 100) {
         setTimeout(() => triggerCooldown(botId), 50);
       }
 
-      // Execute simulated or live save
       executeBotAction(botId, articleTitle, nextTotalEdits);
 
       return {
@@ -271,11 +306,9 @@ export default function BotDashboardPage() {
     });
   };
 
-  // Perform actual or simulated save
   const executeBotAction = async (botId: string, articleTitle: string, editNumber: number) => {
     const timestamp = new Date().toLocaleTimeString();
 
-    // If user is authenticated and token exists, perform real MediaWiki edit via save engine
     if (sessionToken && user) {
       try {
         const dummyWikitext = `== Preservation Update ==\n* Checked by Justapedia Bot Suite (${botId}) on ${new Date().toISOString()}\n* Status: Verified reference integrity and link health.`;
@@ -319,28 +352,6 @@ export default function BotDashboardPage() {
           message: `Network error during save: ${err.message}`,
         });
       }
-    } else {
-      // Unauthenticated Simulation Mode
-      const simulatedRevid = 104200 + editNumber;
-      const simulatedDiff = `https://justapedia.org/index.php?title=${encodeURIComponent(articleTitle.replace(/ /g, "_"))}&diff=prev&oldid=${simulatedRevid}`;
-      
-      const actions: Record<string, string> = {
-        "internet-bot": "Rescued 2 dead links with Wayback snapshots: added {{webarchive}} template.",
-        "birth-update-bot": "Verified birth dates in {{Infobox person}} and synced Category:Births.",
-        "citation-verifier-bot": "Standardized bare URL references into structured {{cite web}} format.",
-        "category-maintenance-bot": "Normalized redirect syntax and categorized article stubs.",
-      };
-
-      const msg = actions[botId] || "Processed article content successfully.";
-
-      addLog(botId, {
-        timestamp,
-        level: "success",
-        articleTitle,
-        diffUrl: simulatedDiff,
-        revid: simulatedRevid,
-        message: `[VERIFIED] ${msg} (Sandbox Preview Mode - Log in to save live)`,
-      });
     }
   };
 
@@ -363,6 +374,167 @@ export default function BotDashboardPage() {
   const totalEditsAllBots = Object.values(botStates).reduce((sum, s) => sum + s.totalEdits, 0);
   const activeBotsCount = Object.values(botStates).filter((s) => s.status === "ON" || s.status === "PAUSED").length;
 
+  // --------------------------------------------------------------------------
+  // Loading State
+  // --------------------------------------------------------------------------
+  if (isAuthLoading) {
+    return (
+      <div className="flex-1 flex flex-col items-center justify-center min-h-[60vh] gap-3">
+        <div className="w-10 h-10 border-3 border-indigo-500/20 border-t-indigo-500 rounded-full animate-spin" />
+        <p className="text-slate-400 text-xs">Authenticating with Justapedia...</p>
+      </div>
+    );
+  }
+
+  // --------------------------------------------------------------------------
+  // ACCESS GATE: If not logged in, DO NOT SHOW BOT DASHBOARD
+  // --------------------------------------------------------------------------
+  if (!user) {
+    return (
+      <div className="flex-1 flex flex-col justify-center items-center px-4 py-16 relative">
+        <div className="absolute top-1/3 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[350px] bg-indigo-600/10 blur-[140px] pointer-events-none rounded-full" />
+
+        <div className="w-full max-w-md relative z-10">
+          
+          {/* Card Header */}
+          <div className="text-center mb-8">
+            <div className="inline-flex w-14 h-14 rounded-2xl bg-gradient-to-tr from-indigo-600 to-indigo-400 items-center justify-center shadow-xl shadow-indigo-600/30 mb-4">
+              <Bot className="w-7 h-7 text-white" />
+            </div>
+            <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
+              Justapedia Bot Suite
+            </h1>
+            <p className="text-xs text-slate-400 mt-2 leading-relaxed">
+              Automated high-speed operations platform. Sign in with your Justapedia account to access the bot dashboard.
+            </p>
+          </div>
+
+          {/* Login Card */}
+          <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 sm:p-8 shadow-2xl backdrop-blur-md">
+            
+            <div className="flex items-center gap-2.5 p-3 rounded-xl bg-indigo-500/10 border border-indigo-500/20 text-xs text-indigo-300 mb-6">
+              <ShieldCheck className="w-4 h-4 flex-shrink-0 text-indigo-400" />
+              <p className="text-[11px] leading-relaxed">
+                <strong>User Attribution Required:</strong> All bot edits are saved under your Justapedia account cookies and recorded in your contribution history.
+              </p>
+            </div>
+
+            {loginError && (
+              <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/20 text-xs text-rose-300 flex items-start gap-2 mb-4">
+                <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5 text-rose-400" />
+                <span>{loginError}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleLoginSubmit} className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+                  Justapedia Username
+                </label>
+                <div className="relative">
+                  <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-500">
+                    <User className="w-4 h-4" />
+                  </div>
+                  <input
+                    type="text"
+                    required
+                    value={loginUsername}
+                    onChange={(e) => setLoginUsername(e.target.value)}
+                    placeholder="e.g. Sourav or BotUsername"
+                    className="w-full pl-9 pr-3 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1.5 flex items-center justify-between">
+                  <span>Password or Bot Password</span>
+                  <a
+                    href="https://justapedia.org/Special:BotPasswords"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-[11px] text-indigo-400 hover:underline flex items-center gap-1 font-normal"
+                  >
+                    <span>Create Bot Password</span>
+                    <ExternalLink className="w-2.5 h-2.5" />
+                  </a>
+                </label>
+                <div className="relative">
+                  <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-500">
+                    <KeyRound className="w-4 h-4" />
+                  </div>
+                  <input
+                    type={showPassword ? "text" : "password"}
+                    required
+                    value={loginPassword}
+                    onChange={(e) => setLoginPassword(e.target.value)}
+                    placeholder="••••••••••••"
+                    className="w-full pl-9 pr-10 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-white"
+                  >
+                    {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+                <p className="text-[11px] text-slate-500 mt-1">
+                  Tip: A dedicated Bot Password with Edit rights is recommended.
+                </p>
+              </div>
+
+              <div className="pt-2">
+                <button
+                  type="submit"
+                  disabled={isLoggingIn}
+                  className="w-full py-2.5 px-4 rounded-xl bg-gradient-to-r from-indigo-600 to-indigo-500 hover:from-indigo-500 hover:to-indigo-400 text-white font-semibold text-sm shadow-lg shadow-indigo-600/30 disabled:opacity-50 disabled:cursor-not-allowed transition flex items-center justify-center gap-2"
+                >
+                  {isLoggingIn ? (
+                    <>
+                      <span className="w-4 h-4 border-2 border-white/20 border-t-white rounded-full animate-spin" />
+                      <span>Authenticating with Justapedia...</span>
+                    </>
+                  ) : (
+                    <>
+                      <LogIn className="w-4 h-4" />
+                      <span>Sign In to Unlock Dashboard</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+
+          </div>
+
+          {/* Bot Suite Feature Preview */}
+          <div className="mt-8 grid grid-cols-2 gap-3 text-xs text-slate-400">
+            <div className="p-3 rounded-xl bg-slate-900/40 border border-slate-800/60">
+              <span className="font-semibold text-white block mb-0.5">1. InternetBot</span>
+              <span className="text-[11px] text-slate-500">Wayback link rot repair & archiving</span>
+            </div>
+            <div className="p-3 rounded-xl bg-slate-900/40 border border-slate-800/60">
+              <span className="font-semibold text-white block mb-0.5">2. Birth Update Bot</span>
+              <span className="text-[11px] text-slate-500">Biographical facts & infobox validation</span>
+            </div>
+            <div className="p-3 rounded-xl bg-slate-900/40 border border-slate-800/60">
+              <span className="font-semibold text-white block mb-0.5">3. Citation Verifier</span>
+              <span className="text-[11px] text-slate-500">Bare URL to {"{{cite web}}"} formatting</span>
+            </div>
+            <div className="p-3 rounded-xl bg-slate-900/40 border border-slate-800/60">
+              <span className="font-semibold text-white block mb-0.5">4. Category Bot</span>
+              <span className="text-[11px] text-slate-500">Stub categorizer & redirect cleaner</span>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    );
+  }
+
+  // --------------------------------------------------------------------------
+  // BOT DASHBOARD (UNLOCKED AFTER LOGIN)
+  // --------------------------------------------------------------------------
   return (
     <div className="flex-1 flex flex-col justify-start pb-20">
       
@@ -386,49 +558,30 @@ export default function BotDashboardPage() {
               </p>
             </div>
 
-            {/* User Attribution Card */}
+            {/* Authenticated User Status Card */}
             <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 min-w-[280px] shadow-lg flex flex-col gap-2">
               <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-                Contribution Attribution
+                Active Operator
               </span>
-              {user ? (
-                <div>
-                  <div className="flex items-center gap-2 text-emerald-400 font-semibold text-sm">
-                    <CheckCircle2 className="w-4 h-4" />
-                    <span>@{user.username}</span>
-                  </div>
-                  <p className="text-[11px] text-slate-400 mt-1">
-                    Edits are recorded directly in your Justapedia contribution history.
-                  </p>
-                  <a
-                    href={user.userContributionsUrl || `https://justapedia.org/Special:Contributions/${user.username}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1 text-[11px] text-indigo-400 hover:underline mt-2"
-                  >
-                    <History className="w-3 h-3" />
-                    <span>Special:Contributions</span>
-                    <ExternalLink className="w-2.5 h-2.5" />
-                  </a>
+              <div>
+                <div className="flex items-center gap-2 text-emerald-400 font-semibold text-sm">
+                  <CheckCircle2 className="w-4 h-4" />
+                  <span>@{user.username}</span>
                 </div>
-              ) : (
-                <div>
-                  <div className="flex items-center gap-2 text-amber-400 font-medium text-xs">
-                    <Lock className="w-3.5 h-3.5" />
-                    <span>Guest Mode (Not logged in)</span>
-                  </div>
-                  <p className="text-[11px] text-slate-400 mt-1">
-                    Sign in to record all bot edits under your Justapedia account.
-                  </p>
-                  <button
-                    onClick={openAuthModal}
-                    className="mt-2 w-full py-1.5 px-3 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-xs shadow-sm transition flex items-center justify-center gap-1.5"
-                  >
-                    <LogIn className="w-3.5 h-3.5" />
-                    <span>Sign in with Justapedia</span>
-                  </button>
-                </div>
-              )}
+                <p className="text-[11px] text-slate-400 mt-1">
+                  All bot edits are recorded in your Justapedia contribution history.
+                </p>
+                <a
+                  href={user.userContributionsUrl || `https://justapedia.org/Special:Contributions/${user.username}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 text-[11px] text-indigo-400 hover:underline mt-2 font-medium"
+                >
+                  <History className="w-3 h-3" />
+                  <span>View Contributions</span>
+                  <ExternalLink className="w-2.5 h-2.5" />
+                </a>
+              </div>
             </div>
           </div>
 
@@ -467,7 +620,7 @@ export default function BotDashboardPage() {
             </div>
           </div>
 
-          {/* Safety Mode Selector */}
+          {/* Safety Destination Selector */}
           <div className="mt-6 flex flex-wrap items-center justify-between gap-4 p-3 rounded-xl bg-slate-900/80 border border-slate-800">
             <div className="flex items-center gap-2 text-xs text-slate-300">
               <Sliders className="w-4 h-4 text-indigo-400" />
@@ -504,7 +657,7 @@ export default function BotDashboardPage() {
         </div>
       </section>
 
-      {/* Main Bot List (Sequential Layout) */}
+      {/* Sequential Bot Registry */}
       <section className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-10">
         <div className="flex items-center justify-between mb-6">
           <div>
@@ -513,7 +666,7 @@ export default function BotDashboardPage() {
               <span>Sequential Bot Registry</span>
             </h2>
             <p className="text-xs text-slate-400 mt-0.5">
-              Manage each bot individually with dedicated start/stop controls and real-time terminals.
+              Manage each bot individually with dedicated start/stop controls and real-time live terminals.
             </p>
           </div>
           <span className="text-xs text-slate-500 font-mono">

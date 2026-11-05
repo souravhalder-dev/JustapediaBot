@@ -2,9 +2,15 @@ import { SignJWT, jwtVerify } from "jose";
 import { AuthUser, LoginResponse } from "./types";
 
 const JUSTAPEDIA_API = "https://justapedia.org/api.php";
-const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 (JustapediaBotSuite/2.0)";
-const JWT_SECRET_STRING = process.env.JWT_SECRET || "justapedia-secure-jwt-signing-key-2025-suite-archivebot";
+const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+const JWT_SECRET_STRING = process.env.JWT_SECRET || "48faa3a54d28680a66104aa5c94df471a857b200";
 const JWT_SECRET = new TextEncoder().encode(JWT_SECRET_STRING);
+
+const DEFAULT_HEADERS = {
+  "User-Agent": USER_AGENT,
+  "Accept": "application/json, text/plain, */*",
+  "Accept-Language": "en-US,en;q=0.9",
+};
 
 export interface SessionPayload {
   sub: string;
@@ -18,11 +24,11 @@ export interface SessionPayload {
 }
 
 /**
- * Format cookie dictionary into a standard Cookie header string
+ * Format cookie dictionary into a standard Cookie header string without double-encoding
  */
 export function formatCookieHeader(cookies: Record<string, string>): string {
   return Object.entries(cookies)
-    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+    .map(([k, v]) => `${k}=${v}`)
     .join("; ");
 }
 
@@ -36,12 +42,12 @@ export function parseSetCookies(setCookieHeaders: string[] | string | null): Rec
   const headerList = Array.isArray(setCookieHeaders) ? setCookieHeaders : [setCookieHeaders];
   for (const header of headerList) {
     const parts = header.split(";");
-    const firstPart = parts[0]?.trim();
-    if (firstPart) {
-      const eqIdx = firstPart.indexOf("=");
+    const cookiePart = parts[0]?.trim();
+    if (cookiePart) {
+      const eqIdx = cookiePart.indexOf("=");
       if (eqIdx > 0) {
-        const key = decodeURIComponent(firstPart.substring(0, eqIdx).trim());
-        const val = decodeURIComponent(firstPart.substring(eqIdx + 1).trim());
+        const key = cookiePart.substring(0, eqIdx).trim();
+        const val = cookiePart.substring(eqIdx + 1).trim();
         result[key] = val;
       }
     }
@@ -51,7 +57,7 @@ export function parseSetCookies(setCookieHeaders: string[] | string | null): Rec
 
 /**
  * Direct MediaWiki Credentials Flow (Username + Password / Bot Password)
- * Matches Birth Update Bot auth_service.py exactly.
+ * Matches Birth Update Bot auth_service.py exactly with realistic browser headers.
  */
 export async function loginToJustapedia(username: string, password: string): Promise<LoginResponse> {
   const uname = (username || "").trim();
@@ -71,17 +77,15 @@ export async function loginToJustapedia(username: string, password: string): Pro
     const tokenUrl = `${JUSTAPEDIA_API}?action=query&meta=tokens&type=login&format=json`;
     const tokenResp = await fetch(tokenUrl, {
       method: "GET",
-      headers: {
-        "User-Agent": USER_AGENT,
-        "Accept": "application/json",
-      },
+      headers: DEFAULT_HEADERS,
       cache: "no-store",
     });
 
     if (!tokenResp.ok) {
+      const errText = await tokenResp.text().catch(() => "");
       return {
         success: false,
-        message: `Justapedia API returned HTTP ${tokenResp.status} during token fetch.`,
+        message: `Justapedia API returned HTTP ${tokenResp.status} during token fetch: ${errText.substring(0, 100)}`,
       };
     }
 
@@ -107,14 +111,18 @@ export async function loginToJustapedia(username: string, password: string): Pro
     loginFormData.append("lgtoken", loginToken);
     loginFormData.append("format", "json");
 
+    const cookieStr1 = formatCookieHeader(accumulatedCookies);
+    const loginHeaders: Record<string, string> = {
+      ...DEFAULT_HEADERS,
+      "Content-Type": "application/x-www-form-urlencoded",
+    };
+    if (cookieStr1) {
+      loginHeaders["Cookie"] = cookieStr1;
+    }
+
     const loginResp = await fetch(JUSTAPEDIA_API, {
       method: "POST",
-      headers: {
-        "User-Agent": USER_AGENT,
-        "Accept": "application/json",
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Cookie": formatCookieHeader(accumulatedCookies),
-      },
+      headers: loginHeaders,
       body: loginFormData.toString(),
       cache: "no-store",
     });
@@ -141,6 +149,8 @@ export async function loginToJustapedia(username: string, password: string): Pro
         reason = `User account '${uname}' does not exist on Justapedia.`;
       } else if (result === "NeedToken") {
         reason = "Re-authentication token requested by Justapedia.";
+      } else if (result === "Failed") {
+        reason = loginData?.login?.reason || "Authentication failed. Please verify your username and password or bot password.";
       }
       return {
         success: false,
@@ -155,8 +165,7 @@ export async function loginToJustapedia(username: string, password: string): Pro
     const userResp = await fetch(userInfoUrl, {
       method: "GET",
       headers: {
-        "User-Agent": USER_AGENT,
-        "Accept": "application/json",
+        ...DEFAULT_HEADERS,
         "Cookie": formatCookieHeader(accumulatedCookies),
       },
       cache: "no-store",
@@ -238,8 +247,7 @@ export async function verifyUserSession(sessionToken: string): Promise<{ valid: 
     const userResp = await fetch(userInfoUrl, {
       method: "GET",
       headers: {
-        "User-Agent": USER_AGENT,
-        "Accept": "application/json",
+        ...DEFAULT_HEADERS,
         "Cookie": formatCookieHeader(session.cookies),
       },
       cache: "no-store",
