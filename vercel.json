@@ -1,4 +1,4 @@
 {
   "framework": "nextjs",
-  "regions": ["iad1", "cle1"]
+  "regions": ["iad1"]
 }

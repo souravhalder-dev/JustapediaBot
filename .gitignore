@@ -31,3 +31,5 @@ legacy-php-app/src/revision_samples/
 
 # Local cache
 .data/
+.vercel
+.env*
