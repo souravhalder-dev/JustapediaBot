@@ -19,7 +19,9 @@ const DEFAULT_HEADERS = {
  * 3. The CSRF token is retrieved under that specific user's session cookies.
  * 4. The edit is committed using the user's authenticated cookies so it is
  *    properly recorded in their user contribution history on Justapedia.
- * 5. No fallback bot account is used when a user is logged in.
+ * 5. In Sandbox Mode, writes to the user's personal sandbox User:<username>/sandbox
+ *    (preventing Project namespace Lockdown issues).
+ * 6. Handles extension hooks gracefully with automatic retries and actionable diagnostics.
  */
 export async function executeJustapediaEdit(
   sessionToken: string,
@@ -30,26 +32,17 @@ export async function executeJustapediaEdit(
     wikitext,
     summary,
     basetimestamp,
-    is_minor = true,
-    is_bot = true,
+    is_minor = false,
+    is_bot = false,
     use_sandbox = false,
+    sandbox_title,
   } = request;
-
-  let targetTitle = title.trim();
-  let textToSave = wikitext;
-  let finalSummary = summary.trim();
-
-  if (use_sandbox) {
-    targetTitle = "Justapedia:Sandbox";
-    textToSave = `<!-- TEST DRAFT FOR [${title}] VIA JUSTAPEDIA ARCHIVEBOT -->\n{{Please leave this line alone (sandbox heading)}}\n\n${wikitext}`;
-    finalSummary = `[TEST] Draft for ${title}: ${summary}`;
-  }
 
   // 1. Verify user session token
   if (!sessionToken) {
     return {
       success: false,
-      title: targetTitle,
+      title: title.trim(),
       message: "Authentication required: You must be logged in with your Justapedia account to save edits.",
     };
   }
@@ -58,7 +51,7 @@ export async function executeJustapediaEdit(
   if (!verification.valid || !verification.session || !verification.user) {
     return {
       success: false,
-      title: targetTitle,
+      title: title.trim(),
       message: verification.error || "Authentication failed: Session invalid or expired. Please re-authenticate.",
     };
   }
@@ -82,20 +75,20 @@ export async function executeJustapediaEdit(
     if (!userinfoResp.ok) {
       return {
         success: false,
-        title: targetTitle,
+        title: title.trim(),
         message: `Justapedia API returned HTTP ${userinfoResp.status} during user verification.`,
       };
     }
 
     const userinfoData = await userinfoResp.json();
     const uinfo = userinfoData?.query?.userinfo;
-    const actualUsername = uinfo?.name;
+    const actualUsername: string = uinfo?.name || "";
     const isAnon = !uinfo || Boolean(uinfo.anon);
 
     if (isAnon || !actualUsername) {
       return {
         success: false,
-        title: targetTitle,
+        title: title.trim(),
         message: "Authentication failed: Justapedia session cookies have expired. Please log in again.",
         raw_response: uinfo,
       };
@@ -104,14 +97,27 @@ export async function executeJustapediaEdit(
     const userRights: string[] = Array.isArray(uinfo?.rights) ? uinfo.rights : [];
     const userGroups: string[] = Array.isArray(uinfo?.groups) ? uinfo.groups : [];
     const hasBotPermission = userRights.includes("bot") || userGroups.includes("bot");
+    const hasCleanTalkBypass = userRights.includes("cleantalk-bypass");
 
     if (expectedUsername && actualUsername.toLowerCase() !== expectedUsername.toLowerCase()) {
       return {
         success: false,
-        title: targetTitle,
+        title: title.trim(),
         message: `Authentication mismatch: MediaWiki authenticated as '${actualUsername}' instead of '${expectedUsername}'. Please log in again.`,
         raw_response: uinfo,
       };
+    }
+
+    // Determine target title and wikitext
+    let targetTitle = title.trim();
+    let textToSave = wikitext;
+    let finalSummary = summary.trim();
+
+    if (use_sandbox) {
+      // In Sandbox mode, prioritize user's personal sandbox (User:<username>/sandbox) to avoid Project namespace restrictions
+      targetTitle = sandbox_title || `User:${actualUsername}/sandbox`;
+      textToSave = `<!-- TEST DRAFT FOR [${title}] VIA JUSTAPEDIA BOT SUITE -->\n{{Please leave this line alone (sandbox heading)}}\n\n${wikitext}`;
+      finalSummary = `[TEST] Draft for ${title}: ${summary}`;
     }
 
     // 3. Retrieve authenticated user's CSRF token
@@ -146,48 +152,100 @@ export async function executeJustapediaEdit(
     }
 
     // 4. Submit edit under the logged-in user's account
-    const formData = new URLSearchParams();
-    formData.append("action", "edit");
-    formData.append("title", targetTitle);
-    formData.append("text", textToSave);
-    formData.append("summary", finalSummary);
-    formData.append("token", csrfToken);
-    formData.append("format", "json");
+    const sendEditPost = async (params: {
+      titleToUse: string;
+      textToUse: string;
+      summaryToUse: string;
+      withBotFlag: boolean;
+      withMinorFlag: boolean;
+    }) => {
+      const formData = new URLSearchParams();
+      formData.append("action", "edit");
+      formData.append("title", params.titleToUse);
+      formData.append("text", params.textToUse);
+      formData.append("summary", params.summaryToUse);
+      formData.append("token", csrfToken);
+      formData.append("format", "json");
+      formData.append("formatversion", "2");
+      formData.append("errorformat", "plaintext");
 
-    if (is_minor) formData.append("minor", "1");
-    // Only send bot=1 if the authenticated user account has the bot permission
-    if (is_bot && hasBotPermission) {
-      formData.append("bot", "1");
-    }
-    if (basetimestamp && !use_sandbox) {
-      formData.append("basetimestamp", basetimestamp);
-    }
+      if (params.withMinorFlag) formData.append("minor", "1");
+      if (params.withBotFlag) formData.append("bot", "1");
+      if (basetimestamp && !use_sandbox) {
+        formData.append("basetimestamp", basetimestamp);
+      }
 
-    const editResp = await fetch(JUSTAPEDIA_API, {
-      method: "POST",
-      headers: {
-        ...DEFAULT_HEADERS,
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Cookie": cookieHeader,
-      },
-      body: formData.toString(),
-      cache: "no-store",
+      const res = await fetch(JUSTAPEDIA_API, {
+        method: "POST",
+        headers: {
+          ...DEFAULT_HEADERS,
+          "Content-Type": "application/x-www-form-urlencoded",
+          "Cookie": cookieHeader,
+        },
+        body: formData.toString(),
+        cache: "no-store",
+      });
+
+      if (!res.ok) {
+        throw new Error(`Justapedia edit POST failed with HTTP ${res.status}`);
+      }
+
+      return await res.json();
+    };
+
+    // Attempt edit
+    let sentWithBot = Boolean(is_bot && hasBotPermission);
+    let data = await sendEditPost({
+      titleToUse: targetTitle,
+      textToUse: textToSave,
+      summaryToUse: finalSummary,
+      withBotFlag: sentWithBot,
+      withMinorFlag: Boolean(is_minor),
     });
 
-    if (!editResp.ok) {
-      return {
-        success: false,
-        title: targetTitle,
-        message: `Justapedia edit POST failed with HTTP ${editResp.status}.`,
-      };
+    console.log(`[JUSTAPEDIA EDIT ATTEMPT] target: "${targetTitle}", editor: "${actualUsername}", botFlag: ${sentWithBot}`);
+
+    // 5. Inspect response and handle errors
+    let errorsList = Array.isArray(data?.errors) ? data.errors : (data?.error ? [data.error] : []);
+
+    // Automatic Hook-Abort Recovery:
+    // If aborted and bot=1 was passed, retry immediately WITHOUT bot flag
+    if (errorsList.length > 0 && errorsList[0]?.code === "hookaborted" && sentWithBot) {
+      console.warn(`[EDIT RETRY] hookaborted with bot=1. Retrying without bot flag as direct user edit...`);
+      sentWithBot = false;
+      data = await sendEditPost({
+        titleToUse: targetTitle,
+        textToUse: textToSave,
+        summaryToUse: finalSummary,
+        withBotFlag: false,
+        withMinorFlag: Boolean(is_minor),
+      });
+      errorsList = Array.isArray(data?.errors) ? data.errors : (data?.error ? [data.error] : []);
     }
 
-    const data = await editResp.json();
+    // Automatic Sandbox Recovery:
+    // If sandbox was set to Justapedia:Sandbox and failed with hookaborted, retry to User:<actualUsername>/sandbox
+    if (errorsList.length > 0 && errorsList[0]?.code === "hookaborted" && use_sandbox && targetTitle === "Justapedia:Sandbox") {
+      const personalSandbox = `User:${actualUsername}/sandbox`;
+      console.warn(`[EDIT RETRY] Justapedia:Sandbox aborted by extension. Retrying on personal sandbox: "${personalSandbox}"...`);
+      targetTitle = personalSandbox;
+      data = await sendEditPost({
+        titleToUse: personalSandbox,
+        textToUse: textToSave,
+        summaryToUse: finalSummary,
+        withBotFlag: sentWithBot,
+        withMinorFlag: Boolean(is_minor),
+      });
+      errorsList = Array.isArray(data?.errors) ? data.errors : (data?.error ? [data.error] : []);
+    }
 
-    // 5. Check for MediaWiki error responses
-    if (data.error) {
-      const errorCode = data.error.code || "unknown";
-      const errorInfo = data.error.info || "Unknown API error";
+    // Check for MediaWiki error responses
+    if (errorsList.length > 0) {
+      const firstErr = errorsList[0];
+      const errorCode = firstErr.code || "unknown";
+      const errorInfo = firstErr.text || firstErr.info || firstErr.message || "Unknown API error";
+
+      console.error(`[JUSTAPEDIA EDIT ERROR] code: ${errorCode}, info: ${errorInfo}, target: ${targetTitle}`);
 
       if (["badtoken", "notoken", "permissiondenied", "assertuserfailed", "mustbeloggedin"].includes(errorCode)) {
         return {
@@ -207,14 +265,18 @@ export async function executeJustapediaEdit(
         return {
           success: false,
           title: targetTitle,
-          message: `Email confirmation required: Your Justapedia account (@${actualUsername}) must validate its email address before making edits. Please visit [[Special:Preferences]] to confirm your email.`,
+          message: `Email confirmation required: Your Justapedia account (@${actualUsername}) must validate its email address before making edits. Please visit Special:Preferences to confirm your email.`,
           raw_response: data,
         };
       } else if (errorCode === "hookaborted") {
+        let cleanTalkHint = "";
+        if (!hasCleanTalkBypass) {
+          cleanTalkHint = ` (Hint: Account @${actualUsername} lacks 'cleantalk-bypass'. You can grant 'cleantalk-bypass' or 'sysop' to @${actualUsername} at Special:UserRights, or sign in as @Sourav).`;
+        }
         return {
           success: false,
           title: targetTitle,
-          message: `Edit aborted by Justapedia extension hook (${errorInfo}).`,
+          message: `Edit aborted by Justapedia extension hook (${errorInfo})${cleanTalkHint}`,
           raw_response: data,
         };
       } else {
@@ -268,7 +330,7 @@ export async function executeJustapediaEdit(
   } catch (err: any) {
     return {
       success: false,
-      title: targetTitle,
+      title: request.title,
       message: `Save exception: ${err.message || String(err)}`,
     };
   }

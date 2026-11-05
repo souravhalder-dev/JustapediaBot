@@ -112,7 +112,21 @@ export default function BotDashboardPage() {
             serverDict[norm] = item;
           });
         }
-        setResolvedArticles({ ...localDict, ...serverDict });
+        const fullDict = { ...localDict, ...serverDict };
+        setResolvedArticles(fullDict);
+
+        // Prune any already-resolved articles from all bot queues immediately
+        setBotStates((prev) => {
+          const updated: Record<string, BotState> = {};
+          for (const [id, st] of Object.entries(prev)) {
+            const filteredQueue = st.articleQueue.filter((t) => {
+              const norm = t.trim().replace(/_/g, " ").toLowerCase();
+              return !fullDict[norm];
+            });
+            updated[id] = { ...st, articleQueue: filteredQueue };
+          }
+          return updated;
+        });
       })
       .catch(() => {
         setResolvedArticles(localDict);
@@ -529,6 +543,7 @@ export default function BotDashboardPage() {
           botId,
           articleTitle,
           use_sandbox: useSandbox,
+          sandbox_title: useSandbox && user?.username ? `User:${user.username}/sandbox` : undefined,
           options: botId === "internet-bot" ? iabotOptions : undefined,
         }),
       });
@@ -994,7 +1009,7 @@ export default function BotDashboardPage() {
                 <Sliders className="w-4 h-4 text-indigo-400" />
                 <span>Destination:</span>
                 <span className="font-semibold text-white">
-                  {useSandbox ? "Justapedia:Sandbox (Safe Draft Testing)" : "Live Wiki Pages (Direct Publishing)"}
+                  {useSandbox ? `User:${user?.username || "You"}/sandbox (Safe Personal Draft)` : "Live Wiki Pages (Direct Publishing)"}
                 </span>
               </div>
 

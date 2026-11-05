@@ -24,7 +24,7 @@ export async function POST(req: NextRequest) {
       sessionToken = body.session_token;
     }
 
-    const { botId, articleTitle, use_sandbox = false, options, force = false } = body;
+    const { botId, articleTitle, use_sandbox = false, sandbox_title, options, force = false } = body;
 
     if (!botId || !articleTitle) {
       return NextResponse.json(
@@ -80,8 +80,9 @@ export async function POST(req: NextRequest) {
         wikitext: botResult.fixedWikitext, // REAL WIKITEXT PRESERVED!
         summary: botResult.summary || `InternetArchiveBot: Rescued references & preserved citations`,
         use_sandbox: Boolean(use_sandbox),
-        is_minor: true,
-        is_bot: true,
+        sandbox_title: sandbox_title,
+        is_minor: false,
+        is_bot: false, // Matches Birth Update Bot saving mechanism for standard user attribution without tripping bot hooks
       });
 
       if (saveRes.success) {

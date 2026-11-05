@@ -106,6 +106,7 @@ export interface SaveArticleRequest {
   is_minor?: boolean;
   is_bot?: boolean;
   use_sandbox?: boolean;
+  sandbox_title?: string;
 }
 
 export interface SaveArticleResponse {
