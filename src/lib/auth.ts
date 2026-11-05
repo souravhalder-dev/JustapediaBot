@@ -1,5 +1,6 @@
 import { SignJWT, jwtVerify } from "jose";
 import { AuthUser, LoginResponse } from "./types";
+import { executeBridgeRequest } from "./justapedia-bridge";
 
 const JUSTAPEDIA_API = "https://justapedia.org/api.php";
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
@@ -57,7 +58,7 @@ export function parseSetCookies(setCookieHeaders: string[] | string | null): Rec
 
 /**
  * Direct MediaWiki Credentials Flow (Username + Password / Bot Password)
- * Matches Birth Update Bot auth_service.py exactly with realistic browser headers.
+ * Bypasses Cloudflare WAF using curl_cffi Chrome TLS impersonation.
  */
 export async function loginToJustapedia(username: string, password: string): Promise<LoginResponse> {
   const uname = (username || "").trim();
@@ -71,78 +72,55 @@ export async function loginToJustapedia(username: string, password: string): Pro
   }
 
   try {
-    let accumulatedCookies: Record<string, string> = {};
-
-    // Step 1: Obtain login token
-    const tokenUrl = `${JUSTAPEDIA_API}?action=query&meta=tokens&type=login&format=json`;
-    const tokenResp = await fetch(tokenUrl, {
+    // Step 1: Obtain login token via Cloudflare-bypass bridge
+    const tokenResp = await executeBridgeRequest<{
+      query?: { tokens?: { logintoken?: string } };
+    }>({
       method: "GET",
-      headers: DEFAULT_HEADERS,
-      cache: "no-store",
+      params: { action: "query", meta: "tokens", type: "login", format: "json" },
     });
 
-    if (!tokenResp.ok) {
-      const errText = await tokenResp.text().catch(() => "");
+    if (tokenResp.status !== 200 || !tokenResp.data?.query?.tokens?.logintoken) {
       return {
         success: false,
-        message: `Justapedia API returned HTTP ${tokenResp.status} during token fetch: ${errText.substring(0, 100)}`,
+        message: `Failed to retrieve login token from Justapedia MediaWiki API (HTTP ${tokenResp.status}): ${tokenResp.error || ""}`,
       };
     }
 
-    // Capture initial cookies (e.g. session id)
-    const rawSetCookies1 = tokenResp.headers.getSetCookie ? tokenResp.headers.getSetCookie() : tokenResp.headers.get("set-cookie");
-    accumulatedCookies = { ...accumulatedCookies, ...parseSetCookies(rawSetCookies1) };
+    const loginToken = tokenResp.data.query.tokens.logintoken;
+    let accumulatedCookies: Record<string, string> = { ...tokenResp.cookies };
 
-    const tokenData = await tokenResp.json();
-    const loginToken = tokenData?.query?.tokens?.logintoken;
-
-    if (!loginToken) {
-      return {
-        success: false,
-        message: "Failed to retrieve login token from Justapedia MediaWiki API.",
+    // Step 2: POST login credentials via Cloudflare-bypass bridge
+    const loginResp = await executeBridgeRequest<{
+      login?: {
+        result?: string;
+        reason?: string;
+        lgusername?: string;
       };
-    }
-
-    // Step 2: POST login credentials
-    const loginFormData = new URLSearchParams();
-    loginFormData.append("action", "login");
-    loginFormData.append("lgname", uname);
-    loginFormData.append("lgpassword", passwd);
-    loginFormData.append("lgtoken", loginToken);
-    loginFormData.append("format", "json");
-
-    const cookieStr1 = formatCookieHeader(accumulatedCookies);
-    const loginHeaders: Record<string, string> = {
-      ...DEFAULT_HEADERS,
-      "Content-Type": "application/x-www-form-urlencoded",
-    };
-    if (cookieStr1) {
-      loginHeaders["Cookie"] = cookieStr1;
-    }
-
-    const loginResp = await fetch(JUSTAPEDIA_API, {
+    }>({
       method: "POST",
-      headers: loginHeaders,
-      body: loginFormData.toString(),
-      cache: "no-store",
+      data: {
+        action: "login",
+        lgname: uname,
+        lgpassword: passwd,
+        lgtoken: loginToken,
+        format: "json",
+      },
+      cookies: accumulatedCookies,
     });
 
-    if (!loginResp.ok) {
+    accumulatedCookies = { ...accumulatedCookies, ...loginResp.cookies };
+
+    if (loginResp.status !== 200) {
       return {
         success: false,
-        message: `Justapedia login request failed with HTTP ${loginResp.status}`,
+        message: `Justapedia login request failed with HTTP ${loginResp.status}: ${loginResp.error || ""}`,
       };
     }
 
-    // Capture authenticated cookies
-    const rawSetCookies2 = loginResp.headers.getSetCookie ? loginResp.headers.getSetCookie() : loginResp.headers.get("set-cookie");
-    accumulatedCookies = { ...accumulatedCookies, ...parseSetCookies(rawSetCookies2) };
-
-    const loginData = await loginResp.json();
-    const result = loginData?.login?.result;
-
+    const result = loginResp.data?.login?.result;
     if (result !== "Success") {
-      let reason = loginData?.login?.reason || result || "Unknown error";
+      let reason = loginResp.data?.login?.reason || result || "Unknown error";
       if (result === "WrongPass") {
         reason = "Incorrect password or bot password. Please verify your credentials.";
       } else if (result === "NotExists") {
@@ -150,7 +128,7 @@ export async function loginToJustapedia(username: string, password: string): Pro
       } else if (result === "NeedToken") {
         reason = "Re-authentication token requested by Justapedia.";
       } else if (result === "Failed") {
-        reason = loginData?.login?.reason || "Authentication failed. Please verify your username and password or bot password.";
+        reason = loginResp.data?.login?.reason || "Authentication failed. Please verify your username and password or bot password.";
       }
       return {
         success: false,
@@ -158,26 +136,37 @@ export async function loginToJustapedia(username: string, password: string): Pro
       };
     }
 
-    const verifiedUsername = loginData?.login?.lgusername || uname;
+    const verifiedUsername = loginResp.data?.login?.lgusername || uname;
 
-    // Step 3: Strictly verify authenticated identity and fetch userinfo
-    const userInfoUrl = `${JUSTAPEDIA_API}?action=query&meta=userinfo&uiprop=rights|groups|editcount&format=json`;
-    const userResp = await fetch(userInfoUrl, {
+    // Step 3: Strictly verify authenticated identity and fetch userinfo via bridge
+    const userResp = await executeBridgeRequest<{
+      query?: {
+        userinfo?: {
+          id?: number;
+          name?: string;
+          anon?: string;
+          editcount?: number;
+          groups?: string[];
+          rights?: string[];
+        };
+      };
+    }>({
       method: "GET",
-      headers: {
-        ...DEFAULT_HEADERS,
-        "Cookie": formatCookieHeader(accumulatedCookies),
+      params: {
+        action: "query",
+        meta: "userinfo",
+        uiprop: "rights|groups|editcount",
+        format: "json",
       },
-      cache: "no-store",
+      cookies: accumulatedCookies,
     });
 
     let editCount = 0;
     let userId: number | undefined;
     let groups: string[] = [];
 
-    if (userResp.ok) {
-      const userData = await userResp.json();
-      const uinfo = userData?.query?.userinfo;
+    if (userResp.status === 200) {
+      const uinfo = userResp.data?.query?.userinfo;
       if (uinfo && !uinfo.anon && uinfo.name) {
         userId = uinfo.id;
         editCount = uinfo.editcount || 0;
@@ -242,23 +231,34 @@ export async function verifyUserSession(sessionToken: string): Promise<{ valid: 
       return { valid: false, error: "Invalid session claims." };
     }
 
-    // Live verify cookies against Justapedia Action API
-    const userInfoUrl = `${JUSTAPEDIA_API}?action=query&meta=userinfo&uiprop=rights|groups|editcount&format=json`;
-    const userResp = await fetch(userInfoUrl, {
+    // Live verify cookies against Justapedia Action API via bridge
+    const userResp = await executeBridgeRequest<{
+      query?: {
+        userinfo?: {
+          id?: number;
+          name?: string;
+          anon?: string;
+          editcount?: number;
+          groups?: string[];
+          rights?: string[];
+        };
+      };
+    }>({
       method: "GET",
-      headers: {
-        ...DEFAULT_HEADERS,
-        "Cookie": formatCookieHeader(session.cookies),
+      params: {
+        action: "query",
+        meta: "userinfo",
+        uiprop: "rights|groups|editcount",
+        format: "json",
       },
-      cache: "no-store",
+      cookies: session.cookies,
     });
 
-    if (!userResp.ok) {
+    if (userResp.status !== 200) {
       return { valid: false, error: "Failed to communicate with Justapedia API." };
     }
 
-    const userData = await userResp.json();
-    const uinfo = userData?.query?.userinfo;
+    const uinfo = userResp.data?.query?.userinfo;
 
     if (!uinfo || uinfo.anon || !uinfo.name) {
       return { valid: false, error: "Session expired on Justapedia. Please log in again." };

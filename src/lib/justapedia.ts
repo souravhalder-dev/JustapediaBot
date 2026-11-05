@@ -1,3 +1,5 @@
+import { executeBridgeRequest } from "./justapedia-bridge";
+
 const JUSTAPEDIA_API = "https://justapedia.org/api.php";
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 const DEFAULT_HEADERS = {
@@ -50,20 +52,35 @@ export async function fetchJustapediaPage(titleOrUrl: string): Promise<Justapedi
     format: "json",
   });
 
-  const response = await fetch(`${JUSTAPEDIA_API}?${params.toString()}`, {
-    headers: {
-      "User-Agent": USER_AGENT,
-      "Accept": "application/json",
-    },
-    // Next.js cache setting
-    cache: "no-store",
-  });
+  let data: any = null;
+  try {
+    const response = await fetch(`${JUSTAPEDIA_API}?${params.toString()}`, {
+      headers: {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/json",
+      },
+      cache: "no-store",
+    });
 
-  if (!response.ok) {
-    throw new Error(`Justapedia API returned HTTP ${response.status}`);
+    if (response.ok) {
+      data = await response.json();
+    }
+  } catch (fetchErr) {
+    console.warn(`[JUSTAPEDIA FETCH] Direct fetch error for ${pageTitle}, falling back to bridge:`, fetchErr);
   }
 
-  const data = await response.json();
+  // Cloudflare fallback via curl_cffi Chrome bridge
+  if (!data?.query?.pages) {
+    const bridgeResp = await executeBridgeRequest<any>({
+      method: "GET",
+      params: Object.fromEntries(params.entries()),
+    });
+    if (bridgeResp.status === 200 && bridgeResp.data) {
+      data = bridgeResp.data;
+    } else {
+      throw new Error(`Justapedia API returned HTTP ${bridgeResp.status || 500}: ${bridgeResp.error || "Unable to reach Justapedia API"}`);
+    }
+  }
   const pages = data?.query?.pages;
 
   if (!pages) {
@@ -153,14 +170,26 @@ export async function fetchCategoryMembers(
   }
 
   try {
+    let data: any = null;
     const response = await fetch(`${JUSTAPEDIA_API}?${params.toString()}`, {
       headers: DEFAULT_HEADERS,
       cache: "no-store",
     });
 
-    if (!response.ok) return { members: [] };
+    if (response.ok) {
+      data = await response.json();
+    } else {
+      const bridgeResp = await executeBridgeRequest<any>({
+        method: "GET",
+        params: Object.fromEntries(params.entries()),
+      });
+      if (bridgeResp.status === 200 && bridgeResp.data) {
+        data = bridgeResp.data;
+      }
+    }
 
-    const data = await response.json();
+    if (!data) return { members: [] };
+
     const membersList = data?.query?.categorymembers || [];
     const nextContinue = data?.continue?.cmcontinue;
 

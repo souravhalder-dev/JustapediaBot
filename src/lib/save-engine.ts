@@ -1,5 +1,6 @@
 import { SaveArticleRequest, SaveArticleResponse } from "./types";
 import { formatCookieHeader, verifyUserSession } from "./auth";
+import { executeBridgeRequest } from "./justapedia-bridge";
 
 const JUSTAPEDIA_API = "https://justapedia.org/api.php";
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
@@ -61,27 +62,36 @@ export async function executeJustapediaEdit(
   const expectedUsername = verification.user.username;
 
   try {
-    // 2. Strictly verify the current authenticated identity with Justapedia Action API
-    const userinfoUrl = `${JUSTAPEDIA_API}?action=query&meta=userinfo&uiprop=groups|rights&format=json`;
-    const userinfoResp = await fetch(userinfoUrl, {
+    // 2. Strictly verify the current authenticated identity with Justapedia Action API via bridge
+    const userinfoResp = await executeBridgeRequest<{
+      query?: {
+        userinfo?: {
+          name?: string;
+          anon?: boolean | string;
+          rights?: string[];
+          groups?: string[];
+        };
+      };
+    }>({
       method: "GET",
-      headers: {
-        ...DEFAULT_HEADERS,
-        "Cookie": cookieHeader,
+      params: {
+        action: "query",
+        meta: "userinfo",
+        uiprop: "groups|rights",
+        format: "json",
       },
-      cache: "no-store",
+      cookies,
     });
 
-    if (!userinfoResp.ok) {
+    if (userinfoResp.status !== 200 || !userinfoResp.data) {
       return {
         success: false,
         title: title.trim(),
-        message: `Justapedia API returned HTTP ${userinfoResp.status} during user verification.`,
+        message: `Justapedia API returned HTTP ${userinfoResp.status} during user verification: ${userinfoResp.error || ""}`,
       };
     }
 
-    const userinfoData = await userinfoResp.json();
-    const uinfo = userinfoData?.query?.userinfo;
+    const uinfo = userinfoResp.data?.query?.userinfo;
     const actualUsername: string = uinfo?.name || "";
     const isAnon = !uinfo || Boolean(uinfo.anon);
 
@@ -120,38 +130,44 @@ export async function executeJustapediaEdit(
       finalSummary = `[TEST] Draft for ${title}: ${summary}`;
     }
 
-    // 3. Retrieve authenticated user's CSRF token
-    const tokenUrl = `${JUSTAPEDIA_API}?action=query&meta=tokens&type=csrf&format=json`;
-    const tokenResp = await fetch(tokenUrl, {
+    // 3. Retrieve authenticated user's CSRF token via bridge
+    const tokenResp = await executeBridgeRequest<{
+      query?: {
+        tokens?: {
+          csrftoken?: string;
+        };
+      };
+    }>({
       method: "GET",
-      headers: {
-        ...DEFAULT_HEADERS,
-        "Cookie": cookieHeader,
+      params: {
+        action: "query",
+        meta: "tokens",
+        type: "csrf",
+        format: "json",
       },
-      cache: "no-store",
+      cookies,
     });
 
-    if (!tokenResp.ok) {
+    if (tokenResp.status !== 200 || !tokenResp.data) {
       return {
         success: false,
         title: targetTitle,
-        message: "Failed to connect to Justapedia to obtain CSRF token.",
+        message: `Failed to connect to Justapedia to obtain CSRF token (HTTP ${tokenResp.status}): ${tokenResp.error || ""}`,
       };
     }
 
-    const tokenData = await tokenResp.json();
-    const csrfToken = tokenData?.query?.tokens?.csrftoken;
+    const csrfToken = tokenResp.data?.query?.tokens?.csrftoken;
 
     if (!csrfToken || csrfToken === "+\\") {
       return {
         success: false,
         title: targetTitle,
         message: "Failed to retrieve valid CSRF token with session cookies. Please re-authenticate.",
-        raw_response: tokenData,
+        raw_response: tokenResp.data,
       };
     }
 
-    // 4. Submit edit under the logged-in user's account
+    // 4. Submit edit under the logged-in user's account via Cloudflare-bypass bridge
     const sendEditPost = async (params: {
       titleToUse: string;
       textToUse: string;
@@ -159,38 +175,34 @@ export async function executeJustapediaEdit(
       withBotFlag: boolean;
       withMinorFlag: boolean;
     }) => {
-      const formData = new URLSearchParams();
-      formData.append("action", "edit");
-      formData.append("title", params.titleToUse);
-      formData.append("text", params.textToUse);
-      formData.append("summary", params.summaryToUse);
-      formData.append("token", csrfToken);
-      formData.append("format", "json");
-      formData.append("formatversion", "2");
-      formData.append("errorformat", "plaintext");
+      const editData: Record<string, string> = {
+        action: "edit",
+        title: params.titleToUse,
+        text: params.textToUse,
+        summary: params.summaryToUse,
+        token: csrfToken,
+        format: "json",
+        formatversion: "2",
+        errorformat: "plaintext",
+      };
 
-      if (params.withMinorFlag) formData.append("minor", "1");
-      if (params.withBotFlag) formData.append("bot", "1");
+      if (params.withMinorFlag) editData.minor = "1";
+      if (params.withBotFlag) editData.bot = "1";
       if (basetimestamp && !use_sandbox) {
-        formData.append("basetimestamp", basetimestamp);
+        editData.basetimestamp = basetimestamp;
       }
 
-      const res = await fetch(JUSTAPEDIA_API, {
+      const res = await executeBridgeRequest<any>({
         method: "POST",
-        headers: {
-          ...DEFAULT_HEADERS,
-          "Content-Type": "application/x-www-form-urlencoded",
-          "Cookie": cookieHeader,
-        },
-        body: formData.toString(),
-        cache: "no-store",
+        data: editData,
+        cookies,
       });
 
-      if (!res.ok) {
-        throw new Error(`Justapedia edit POST failed with HTTP ${res.status}`);
+      if (res.status !== 200 || !res.data) {
+        throw new Error(`Justapedia edit POST failed with HTTP ${res.status}: ${res.error || ""}`);
       }
 
-      return await res.json();
+      return res.data;
     };
 
     // Attempt edit
