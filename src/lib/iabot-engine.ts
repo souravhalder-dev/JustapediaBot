@@ -13,6 +13,7 @@ import {
   validateArchiveSnapshot,
   repairBrokenArchiveUrl,
   requestWaybackSave,
+  parseArchiveUrl,
   WaybackSnapshot,
 } from "./wayback";
 
@@ -42,6 +43,17 @@ export interface IABotProcessResult {
   summary: string;
   stats: IABotStats;
   details: string[];
+}
+
+function isMalformedArchiveDate(dateStr?: string): boolean {
+  if (!dateStr || dateStr.trim().length === 0) return true;
+  const s = dateStr.trim();
+  // Check if multiple years exist e.g. "2013-05-14 24, 2019"
+  const yearMatches = s.match(/\b(19\d\d|20\d\d)\b/g);
+  if (yearMatches && yearMatches.length > 1) return true;
+  // Check if contains ISO date followed by extra characters
+  if (/^\d{4}-\d{2}-\d{2}\s+\S+/.test(s)) return true;
+  return false;
 }
 
 /**
@@ -95,17 +107,19 @@ export async function processArticleWithIABot(
     stats.referencesChecked++;
 
     // ------------------------------------------------------------------------
-    // CASE A: Citation already has an archive link -> Check for repair
+    // CASE A: Citation already has an archive link -> Check for repair & date integrity
     // ------------------------------------------------------------------------
     if (item.citationTemplate?.archiveUrl && repairBrokenArchives) {
       const existingArchive = item.citationTemplate.archiveUrl;
+      const existingArchiveDate = item.citationTemplate.archiveDate;
       const isAlive = await validateArchiveSnapshot(existingArchive);
 
       if (!isAlive) {
         // Attempt to repair broken archive by finding alternative CDX capture
         const replacement = await repairBrokenArchiveUrl(existingArchive, item.url);
         if (replacement && replacement.available) {
-          const newArchiveDate = formatWaybackDate(replacement.timestamp);
+          const sampleDate = item.citationTemplate?.citationDate || item.citationTemplate?.accessDate;
+          const newArchiveDate = formatWaybackDate(replacement.timestamp, sampleDate);
           const patched = patchCitationTemplate(
             item.citationTemplate,
             replacement.url,
@@ -120,8 +134,37 @@ export async function processArticleWithIABot(
             continue;
           }
         }
+      } else if (isMalformedArchiveDate(existingArchiveDate)) {
+        // Existing archive URL is alive, but archive-date is corrupted (e.g. merged "2013-05-14 24, 2019") or missing
+        const parsedArch = parseArchiveUrl(existingArchive);
+        let fixedDate = "";
+        const sampleDate = item.citationTemplate?.citationDate || item.citationTemplate?.accessDate || existingArchiveDate;
+        if (parsedArch.timestamp) {
+          fixedDate = formatWaybackDate(parsedArch.timestamp, sampleDate);
+        } else {
+          const snap = await findBestWaybackSnapshot(item.url, sampleDate);
+          if (snap && snap.available) {
+            fixedDate = formatWaybackDate(snap.timestamp, sampleDate);
+          }
+        }
+
+        if (fixedDate) {
+          const patched = patchCitationTemplate(
+            item.citationTemplate,
+            existingArchive,
+            fixedDate,
+            item.citationTemplate.urlStatus || "dead"
+          );
+
+          if (patched !== item.citationTemplate.rawString) {
+            currentWikitext = currentWikitext.replace(item.citationTemplate.rawString, patched);
+            stats.archiveLinksRepaired++;
+            details.push(`Repaired corrupted archive-date in {{${item.citationTemplate.templateName}}} on "${item.url}" -> ${fixedDate}`);
+            continue;
+          }
+        }
       } else {
-        // Existing archive is healthy and working; no modification needed
+        // Existing archive is healthy and date is valid; no modification needed
         continue;
       }
     }
@@ -142,7 +185,8 @@ export async function processArticleWithIABot(
       const snapshot = await findBestWaybackSnapshot(item.url, targetDate);
 
       if (snapshot && snapshot.available) {
-        const archiveDate = formatWaybackDate(snapshot.timestamp);
+        const sampleDate = item.citationTemplate?.archiveDate || item.citationTemplate?.citationDate || item.citationTemplate?.accessDate || targetDate;
+        const archiveDate = formatWaybackDate(snapshot.timestamp, sampleDate);
 
         if (item.citationTemplate) {
           // 1. Patch Citation Template ({{cite web}}, {{cite news}}, etc.)
@@ -196,7 +240,8 @@ export async function processArticleWithIABot(
       // 2. Look for existing or recent snapshot to add proactive archive
       const snapshot = await findBestWaybackSnapshot(item.url);
       if (snapshot && snapshot.available && item.citationTemplate) {
-        const archiveDate = formatWaybackDate(snapshot.timestamp);
+        const sampleDate = item.citationTemplate?.citationDate || item.citationTemplate?.accessDate;
+        const archiveDate = formatWaybackDate(snapshot.timestamp, sampleDate);
         const patched = patchCitationTemplate(
           item.citationTemplate,
           snapshot.url,

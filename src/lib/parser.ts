@@ -2,8 +2,8 @@ import { extractDomain } from "./utils";
 import { parseArchiveUrl, formatWaybackDate } from "./wayback";
 import { ExtractedLink } from "./types";
 
-export function formatArchiveDate(timestamp: string): string {
-  return formatWaybackDate(timestamp);
+export function formatArchiveDate(timestamp: string, sampleDate?: string): string {
+  return formatWaybackDate(timestamp, sampleDate);
 }
 
 export function generateFixedWikitext(
@@ -317,40 +317,75 @@ export function extractLinksFromWikitext(wikitext: string): ParsedItem[] {
 /**
  * Patch a citation template to add/modify archive-url, archive-date, and url-status
  * Preserves the exact formatting and parameter spacing style.
+ * Matches the citation's existing date style (MDY, DMY, or ISO) to comply with Template:Cite web / CS1.
  */
 export function patchCitationTemplate(
   template: CitationTemplate,
   archiveUrl: string,
   archiveDate: string,
-  urlStatus: "dead" | "live" = "dead"
+  urlStatus: "dead" | "live" | "unfit" | "usurped" = "dead"
 ): string {
   let text = template.rawString;
-  const sp = template.paramSpacing;
+  const sp = typeof template.paramSpacing === "string" ? template.paramSpacing : " ";
 
-  // 1. If archive-url or archiveurl exists, replace its value (even if empty)
-  if (/\|\s*archive-?url\s*=/i.test(text)) {
-    text = text.replace(/(\|\s*archive-?url\s*=\s*)([^\s|}]*)/i, `$1${archiveUrl}`);
+  // Detect existing date format from template to ensure CS1 consistency
+  const sample =
+    template.params["archive-date"] ||
+    template.params["archivedate"] ||
+    template.params["archive_date"] ||
+    template.params["date"] ||
+    template.params["access-date"] ||
+    template.params["accessdate"] ||
+    template.params["publication-date"] ||
+    template.citationDate ||
+    template.accessDate;
+
+  // Format date to match template's style (MDY, DMY, or ISO)
+  const formattedDate = formatWaybackDate(archiveDate, sample) || archiveDate;
+
+  const normalizeP1 = (p1: string): string => {
+    const hadSpace = /[ \t]$/.test(p1);
+    const base = p1.replace(/[ \t]+$/, "");
+    const space = hadSpace || sp === " " ? " " : "";
+    return base + space;
+  };
+
+  const injectParam = (srcText: string, key: string, val: string): string => {
+    if (srcText.includes("\n")) {
+      const indentMatch = srcText.match(/\n([ \t]*)\|/);
+      const indent = indentMatch ? indentMatch[1] : "  ";
+      return srcText.replace(/\n\s*\}\}$/, `\n${indent}|${sp}${key}${sp}=${sp}${val}\n}}`);
+    } else {
+      return srcText.replace(/\s*\}\}$/, `${sp}|${sp}${key}${sp}=${sp}${val}${sp}}}`);
+    }
+  };
+
+  // 1. If archive-url or archiveurl or archive_url exists, replace its entire value cleanly
+  const archiveUrlRegex = /(\|\s*(?:archive-?url|archive_url)[ \t]*=[ \t]*)([\s\S]*?)(?=[ \t]*(?:[|}]))/i;
+  if (archiveUrlRegex.test(text)) {
+    text = text.replace(archiveUrlRegex, (_m, p1) => `${normalizeP1(p1)}${archiveUrl}`);
   } else {
-    // Inject archive-url before the closing "}}"
-    text = text.replace(/\s*\}\}$/, `${sp}|${sp}archive-url${sp}=${sp}${archiveUrl}${sp}}}`);
+    text = injectParam(text, "archive-url", archiveUrl);
   }
 
-  // 2. If archive-date or archivedate exists, replace its value (even if empty)
-  if (/\|\s*archive-?date\s*=/i.test(text)) {
-    text = text.replace(/(\|\s*archive-?date\s*=\s*)([^\s|}]*)/i, `$1${archiveDate}`);
+  // 2. If archive-date or archivedate or archive_date exists, replace its entire value cleanly
+  const archiveDateRegex = /(\|\s*(?:archive-?date|archive_date)[ \t]*=[ \t]*)([\s\S]*?)(?=[ \t]*(?:[|}]))/i;
+  if (archiveDateRegex.test(text)) {
+    text = text.replace(archiveDateRegex, (_m, p1) => `${normalizeP1(p1)}${formattedDate}`);
   } else {
-    // Inject archive-date before the closing "}}"
-    text = text.replace(/\s*\}\}$/, `${sp}|${sp}archive-date${sp}=${sp}${archiveDate}${sp}}}`);
+    text = injectParam(text, "archive-date", formattedDate);
   }
 
   // 3. If url-status or dead-url exists, set it
-  if (/\|\s*url-status\s*=/i.test(text)) {
-    text = text.replace(/(\|\s*url-status\s*=\s*)([^\s|}]*)/i, `$1${urlStatus}`);
-  } else if (/\|\s*dead-?url\s*=/i.test(text)) {
-    text = text.replace(/(\|\s*dead-?url\s*=\s*)([^\s|}]*)/i, `$1${urlStatus === "dead" ? "yes" : "no"}`);
+  const urlStatusRegex = /(\|\s*url-status[ \t]*=[ \t]*)([\s\S]*?)(?=[ \t]*(?:[|}]))/i;
+  const deadUrlRegex = /(\|\s*dead-?url[ \t]*=[ \t]*)([\s\S]*?)(?=[ \t]*(?:[|}]))/i;
+
+  if (urlStatusRegex.test(text)) {
+    text = text.replace(urlStatusRegex, (_m, p1) => `${normalizeP1(p1)}${urlStatus}`);
+  } else if (deadUrlRegex.test(text)) {
+    text = text.replace(deadUrlRegex, (_m, p1) => `${normalizeP1(p1)}${urlStatus === "dead" ? "yes" : "no"}`);
   } else {
-    // Inject url-status
-    text = text.replace(/\s*\}\}$/, `${sp}|${sp}url-status${sp}=${sp}${urlStatus}${sp}}}`);
+    text = injectParam(text, "url-status", urlStatus);
   }
 
   return text;

@@ -72,16 +72,68 @@ export function parseArchiveUrl(archiveUrl: string): {
   return { isArchive: false };
 }
 
+export const MONTH_NAMES = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December"
+] as const;
+
 /**
- * Format 14-digit Wayback timestamp (e.g. 20180412153022) to readable date format: "YYYY-MM-DD"
+ * Detect the date style of an existing citation parameter or sample string
+ * Supports Month D, YYYY (MDY), D Month YYYY (DMY), and ISO YYYY-MM-DD
  */
-export function formatWaybackDate(timestamp: string): string {
-  const clean = timestamp.replace(/[^0-9]/g, "");
+export function detectDateFormat(sample?: string): "MDY" | "DMY" | "ISO" {
+  if (!sample || typeof sample !== "string") return "ISO";
+  const s = sample.trim();
+
+  // Corrupted merged date check: e.g. "2013-05-14 24, 2019" -> MDY
+  if (/^\d{4}-\d{2}-\d{2}\s+\d{1,2},\s*\d{4}$/.test(s)) return "MDY";
+
+  // MDY: "June 24, 2019" or "June 24 2019"
+  if (/^[A-Za-z]+\s+\d{1,2},?\s+\d{4}$/.test(s)) return "MDY";
+
+  // DMY: "24 June 2019"
+  if (/^\d{1,2}\s+[A-Za-z]+\s+\d{4}$/.test(s)) return "DMY";
+
+  // ISO: "2019-06-24"
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return "ISO";
+
+  // Check if any English month name is present
+  const monthRegex = new RegExp(`(?:${MONTH_NAMES.join("|")})`, "i");
+  if (monthRegex.test(s)) {
+    if (/^\d{1,2}\s+[A-Za-z]/.test(s)) return "DMY";
+    return "MDY";
+  }
+
+  return "ISO";
+}
+
+/**
+ * Format 14-digit Wayback timestamp (e.g. 20180412153022) or ISO date to standard citation date format.
+ * Matches the citation's existing date style (MDY "Month D, YYYY", DMY "D Month YYYY", or ISO "YYYY-MM-DD")
+ * as prescribed by Wikipedia & Justapedia Template:Cite web / CS1 guidelines.
+ */
+export function formatWaybackDate(timestamp: string, sampleDate?: string): string {
+  const clean = String(timestamp).replace(/[^0-9]/g, "");
   if (clean.length < 8) return "";
-  const year = clean.substring(0, 4);
-  const month = clean.substring(4, 6);
-  const day = clean.substring(6, 8);
-  return `${year}-${month}-${day}`;
+  const year = parseInt(clean.substring(0, 4), 10);
+  const month = parseInt(clean.substring(4, 6), 10);
+  const day = parseInt(clean.substring(6, 8), 10);
+
+  if (isNaN(year) || isNaN(month) || isNaN(day) || month < 1 || month > 12 || day < 1 || day > 31) {
+    return "";
+  }
+
+  const monthName = MONTH_NAMES[month - 1];
+  const isoDate = `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+
+  const style = detectDateFormat(sampleDate);
+  if (style === "MDY") {
+    return `${monthName} ${day}, ${year}`;
+  }
+  if (style === "DMY") {
+    return `${day} ${monthName} ${year}`;
+  }
+  return isoDate;
 }
 
 /**
