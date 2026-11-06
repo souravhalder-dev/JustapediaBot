@@ -204,9 +204,18 @@ export function extractLinksFromWikitext(wikitext: string): ParsedItem[] {
         const citationDate = params["date"] || params["publication-date"] || params["year"];
         const accessDate = params["access-date"] || params["accessdate"];
 
-        // Check if {{dead link}} is immediately after this template
-        const postString = wikitext.substring(match.index + rawString.length, match.index + rawString.length + 60);
-        const hasDeadTag = /\{\{\s*dead[ _]link/i.test(postString) || urlStatus === "dead";
+        // Check if {{dead link}} is attached to or immediately follows this template/ref
+        const postString = wikitext.substring(match.index + rawString.length, match.index + rawString.length + 350);
+        const hasDeadTag =
+          /\{\{\s*dead[ _]?link/i.test(postString) ||
+          /\{\{\s*dead[ _]?link/i.test(rawString) ||
+          urlStatus === "dead";
+
+        const hasArchive =
+          Boolean(archiveUrl) ||
+          /\{\{\s*webarchive/i.test(postString) ||
+          /web\.archive\.org/i.test(url) ||
+          /archive\.today/i.test(url);
 
         const citationTpl: CitationTemplate = {
           rawString,
@@ -219,7 +228,7 @@ export function extractLinksFromWikitext(wikitext: string): ParsedItem[] {
           archiveUrl,
           archiveDate,
           urlStatus,
-          hasArchive: Boolean(archiveUrl),
+          hasArchive,
           hasDeadTag,
           citationDate,
           accessDate,
@@ -232,7 +241,7 @@ export function extractLinksFromWikitext(wikitext: string): ParsedItem[] {
           linkType: "template",
           templateName: rawTplName.trim(),
           rawString,
-          hasArchive: Boolean(archiveUrl),
+          hasArchive,
           hasDeadTag,
           startIndex: match.index,
           endIndex: match.index + rawString.length,
@@ -447,15 +456,25 @@ export function removeDeadLinkTag(wikitext: string, targetString: string): strin
 
 /**
  * Tag an unrecoverable reference with {{dead link}}
+ * Places {{dead link}} INSIDE <ref> tags if the reference is enclosed in <ref>...</ref>
  */
 export function tagDeadLink(rawString: string): string {
   const now = new Date();
   const monthYear = `${now.toLocaleString("en-US", { month: "long" })} ${now.getFullYear()}`;
-  const tag = ` {{dead link |date=${monthYear} |fix-attempted=yes}}`;
+  const tag = `{{dead link |date=${monthYear} |fix-attempted=yes}}`;
 
-  if (rawString.includes("{{dead link") || rawString.includes("{{deadlink")) {
+  if (/\{\{\s*dead[ _]?link/i.test(rawString)) {
     return rawString;
   }
 
-  return `${rawString}${tag}`;
+  // If rawString is enclosed in <ref>...</ref>, place tag inside before </ref>
+  const refOpenMatch = rawString.match(/^<ref(?:\s+[^>]*)?>/i);
+  const refCloseIdx = rawString.lastIndexOf("</ref>");
+  if (refOpenMatch && refCloseIdx !== -1) {
+    const refOpen = refOpenMatch[0];
+    const inner = rawString.substring(refOpen.length, refCloseIdx).trim();
+    return `${refOpen}${inner} ${tag}</ref>`;
+  }
+
+  return `${rawString} ${tag}`;
 }
