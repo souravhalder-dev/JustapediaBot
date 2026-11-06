@@ -12,6 +12,9 @@ export interface LinkCheckOutcome {
   isPermanentDead: boolean;
   isTemporaryError: boolean;
   isSoft404?: boolean;
+  isConfirmedAccessible: boolean; // Confirmed 200-399 and genuinely accessible to readers
+  isConfirmedDead: boolean;       // Confirmed 404, 410, DNS fail, or soft-404
+  isInconclusive: boolean;        // Timeout, 401/403/451, 5xx, or network error
   error?: string;
 }
 
@@ -120,14 +123,14 @@ async function fetchWithTimeout(
  * Advanced Link Health Checker following official InternetArchiveBot guidelines.
  *
  * InternetArchiveBot rules:
- * 1. A link is ALIVE if it returns HTTP 2xx or 3xx (unless soft-404).
- * 2. Paywalls and access restrictions (HTTP 401, 403, 451) are ALIVE.
- * 3. A link is ONLY PERMANENTLY DEAD if:
- *    - It returns HTTP 404 Not Found or 410 Gone on both HEAD and GET, and verified on retry.
+ * 1. A link is ACCESSIBLE (ALIVE) if it returns HTTP 2xx or 3xx (unless soft-404).
+ * 2. Paywalls and access restrictions (HTTP 401, 403, 451) are INCONCLUSIVE / NOT CONFIRMED DEAD.
+ * 3. A link is ONLY CONFIRMED PERMANENTLY DEAD if:
+ *    - It returns HTTP 404 Not Found or 410 Gone on both HEAD and GET, verified on retry.
  *    - Domain DNS resolution fails (ENOTFOUND / NXDOMAIN) on multiple attempts.
  *    - Confirmed soft-404 redirect.
- * 4. Timeouts, 5xx server errors, rate limits (429), and connection resets are TRANSIENT.
- *    They MUST NEVER be tagged as dead links.
+ * 4. Timeouts, 5xx server errors, rate limits (429), and connection resets are INCONCLUSIVE.
+ *    They MUST NEVER cause tags to be added or removed.
  */
 export async function checkUrlHealth(
   url: string,
@@ -151,6 +154,9 @@ export async function checkUrlHealth(
       latencyMs: 1,
       isPermanentDead: false,
       isTemporaryError: false,
+      isConfirmedAccessible: true,
+      isConfirmedDead: false,
+      isInconclusive: false,
     };
     urlCheckCache.set(url, outcome);
     return outcome;
@@ -187,6 +193,9 @@ export async function checkUrlHealth(
           isPermanentDead: true,
           isTemporaryError: false,
           isSoft404: true,
+          isConfirmedAccessible: false,
+          isConfirmedDead: true,
+          isInconclusive: false,
           error: "Redirected to root or login/error page (Soft 404)",
         };
         urlCheckCache.set(url, outcome);
@@ -201,12 +210,16 @@ export async function checkUrlHealth(
         latencyMs: Date.now() - startTime,
         isPermanentDead: false,
         isTemporaryError: false,
+        isConfirmedAccessible: true,
+        isConfirmedDead: false,
+        isInconclusive: false,
       };
       urlCheckCache.set(url, outcome);
       return outcome;
     }
 
-    // 3. If HEAD returned 401, 403, 451: Page is alive (paywalled or bot-protected)
+    // 3. If HEAD returned 401, 403, 451: Page is restricted/paywalled
+    // Not confirmed dead, but NOT confirmed publicly accessible. Treat as inconclusive.
     if (code === 401 || code === 403 || code === 451) {
       const outcome: LinkCheckOutcome = {
         url,
@@ -216,13 +229,17 @@ export async function checkUrlHealth(
         latencyMs: Date.now() - startTime,
         isPermanentDead: false,
         isTemporaryError: false,
+        isConfirmedAccessible: false, // Access restricted, do NOT change status based on this
+        isConfirmedDead: false,       // Do NOT tag as dead
+        isInconclusive: true,
+        error: `HTTP ${code} access restricted / paywall`,
       };
       urlCheckCache.set(url, outcome);
       return outcome;
     }
 
     // 4. In ALL OTHER CASES (HEAD returned 404, 405, 500, error, or timed out):
-    // Many servers block or misbehave on HEAD requests. ALWAYS fallback to GET!
+    // Fallback to GET request with Range header
     const getResult = await fetchWithTimeout(url, "GET", currentTimeout + 2000);
     const getCode = getResult.status;
     if (getResult.finalUrl) finalUrl = getResult.finalUrl;
@@ -230,7 +247,7 @@ export async function checkUrlHealth(
     if (getCode) {
       lastCode = getCode;
 
-      // GET succeeded with 2xx / 3xx -> ALIVE
+      // GET succeeded with 2xx / 3xx -> CONFIRMED ACCESSIBLE
       if (getCode >= 200 && getCode < 400) {
         if (isSoft404Redirect(url, finalUrl)) {
           const outcome: LinkCheckOutcome = {
@@ -242,6 +259,9 @@ export async function checkUrlHealth(
             isPermanentDead: true,
             isTemporaryError: false,
             isSoft404: true,
+            isConfirmedAccessible: false,
+            isConfirmedDead: true,
+            isInconclusive: false,
             error: "Redirected to root or login/error page (Soft 404)",
           };
           urlCheckCache.set(url, outcome);
@@ -256,12 +276,15 @@ export async function checkUrlHealth(
           latencyMs: Date.now() - startTime,
           isPermanentDead: false,
           isTemporaryError: false,
+          isConfirmedAccessible: true,
+          isConfirmedDead: false,
+          isInconclusive: false,
         };
         urlCheckCache.set(url, outcome);
         return outcome;
       }
 
-      // GET returned 401, 403, 451 -> ALIVE
+      // GET returned 401, 403, 451 -> restricted/paywall
       if (getCode === 401 || getCode === 403 || getCode === 451) {
         const outcome: LinkCheckOutcome = {
           url,
@@ -271,6 +294,10 @@ export async function checkUrlHealth(
           latencyMs: Date.now() - startTime,
           isPermanentDead: false,
           isTemporaryError: false,
+          isConfirmedAccessible: false,
+          isConfirmedDead: false,
+          isInconclusive: true,
+          error: `HTTP ${getCode} access restricted / paywall`,
         };
         urlCheckCache.set(url, outcome);
         return outcome;
@@ -289,6 +316,9 @@ export async function checkUrlHealth(
           latencyMs: Date.now() - startTime,
           isPermanentDead: true,
           isTemporaryError: false,
+          isConfirmedAccessible: false,
+          isConfirmedDead: true,
+          isInconclusive: false,
           error: `HTTP ${getCode} confirmed on multiple checks`,
         };
         urlCheckCache.set(url, outcome);
@@ -306,6 +336,9 @@ export async function checkUrlHealth(
           latencyMs: Date.now() - startTime,
           isPermanentDead: false,
           isTemporaryError: true,
+          isConfirmedAccessible: false,
+          isConfirmedDead: false,
+          isInconclusive: true,
           error: `Temporary HTTP ${getCode} server error`,
         };
         urlCheckCache.set(url, outcome);
@@ -325,6 +358,9 @@ export async function checkUrlHealth(
           latencyMs: Date.now() - startTime,
           isPermanentDead: true,
           isTemporaryError: false,
+          isConfirmedAccessible: false,
+          isConfirmedDead: true,
+          isInconclusive: false,
           error: "DNS resolution failed (Domain does not exist)",
         };
         urlCheckCache.set(url, outcome);
@@ -336,8 +372,8 @@ export async function checkUrlHealth(
     }
   }
 
-  // If we reach here, the check was inconclusive (e.g. timeout, 5xx, or connection error)
-  // CRITICAL RULE: NEVER mark inconclusive errors as permanently dead!
+  // Inconclusive fallback (timeout, 5xx, or network error)
+  // NEVER mark inconclusive errors as permanently dead or change status!
   const finalOutcome: LinkCheckOutcome = {
     url,
     status: "error",
@@ -346,6 +382,9 @@ export async function checkUrlHealth(
     latencyMs: Date.now() - startTime,
     isPermanentDead: false,
     isTemporaryError: true,
+    isConfirmedAccessible: false,
+    isConfirmedDead: false,
+    isInconclusive: true,
     error: lastError || `Inconclusive after checks (HTTP ${lastCode || "unknown"})`,
   };
   urlCheckCache.set(url, finalOutcome);

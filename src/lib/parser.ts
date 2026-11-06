@@ -204,16 +204,32 @@ export function extractLinksFromWikitext(wikitext: string): ParsedItem[] {
         const citationDate = params["date"] || params["publication-date"] || params["year"];
         const accessDate = params["access-date"] || params["accessdate"];
 
-        // Check if {{dead link}} is attached to or immediately follows this template/ref
-        const postString = wikitext.substring(match.index + rawString.length, match.index + rawString.length + 350);
+        // Check if {{dead link}} or {{webarchive}} is attached to THIS template/ref.
+        // MUST NEVER look past the enclosing </ref> or into the next <ref>!
+        const forwardSlice = wikitext.substring(match.index + rawString.length);
+        const nextCloseRef = forwardSlice.indexOf("</ref>");
+        const nextOpenRef = forwardSlice.indexOf("<ref");
+
+        let immediatePost = "";
+        if (nextCloseRef !== -1 && (nextOpenRef === -1 || nextCloseRef < nextOpenRef)) {
+          // Inside <ref>...</ref>: only check content up to </ref>, plus immediately trailing template right after </ref>
+          const afterClose = forwardSlice.substring(nextCloseRef + 6);
+          const trailingMatch = afterClose.match(/^\s*(\{\{\s*(?:dead[ _]?link|webarchive|wayback)[^{}]*\}\})/i);
+          immediatePost = forwardSlice.substring(0, nextCloseRef) + (trailingMatch ? trailingMatch[0] : "");
+        } else {
+          // Outside <ref>: only check up to newline or next link/ref
+          const boundary = forwardSlice.search(/[\n\r]|<ref/i);
+          immediatePost = boundary !== -1 ? forwardSlice.substring(0, boundary) : forwardSlice.substring(0, 80);
+        }
+
         const hasDeadTag =
-          /\{\{\s*dead[ _]?link/i.test(postString) ||
+          /\{\{\s*dead[ _]?link/i.test(immediatePost) ||
           /\{\{\s*dead[ _]?link/i.test(rawString) ||
           urlStatus === "dead";
 
         const hasArchive =
           Boolean(archiveUrl) ||
-          /\{\{\s*webarchive/i.test(postString) ||
+          /\{\{\s*(?:webarchive|wayback)/i.test(immediatePost) ||
           /web\.archive\.org/i.test(url) ||
           /archive\.today/i.test(url);
 
@@ -443,18 +459,31 @@ export function patchCitationTemplate(
  * Remove obsolete {{dead link}} templates following a rescued citation
  */
 export function removeDeadLinkTag(wikitext: string, targetString: string): string {
-  const deadLinkRegex = /\s*\{\{\s*dead[ _]?link\s*(?:\|[^{}]*)?\}\}/gi;
   const idx = wikitext.indexOf(targetString);
   if (idx === -1) return wikitext;
 
-  // Search in a generous window (up to 350 chars after the target)
-  const windowEnd = Math.min(wikitext.length, idx + targetString.length + 350);
-  const afterTarget = wikitext.substring(idx + targetString.length, windowEnd);
+  const afterTarget = wikitext.substring(idx + targetString.length);
+  const nextCloseRef = afterTarget.indexOf("</ref>");
+  const nextOpenRef = afterTarget.indexOf("<ref");
 
-  if (deadLinkRegex.test(afterTarget)) {
-    deadLinkRegex.lastIndex = 0;
-    const cleanedAfter = afterTarget.replace(deadLinkRegex, "");
-    return wikitext.substring(0, idx + targetString.length) + cleanedAfter + wikitext.substring(windowEnd);
+  let maxBoundary = -1;
+  if (nextCloseRef !== -1 && (nextOpenRef === -1 || nextCloseRef < nextOpenRef)) {
+    // Within the same <ref> tag: check up to </ref> plus immediate trailing template right after </ref>
+    const afterClose = afterTarget.substring(nextCloseRef + 6);
+    const trailingTplMatch = afterClose.match(/^\s*(\{\{\s*dead[ _]?link[^{}]*\}\})/i);
+    maxBoundary = nextCloseRef + (trailingTplMatch ? 6 + trailingTplMatch[0].length : 6);
+  } else {
+    // Outside ref: stop at newline or next <ref
+    const end = afterTarget.search(/[\n\r]|<ref/i);
+    maxBoundary = end !== -1 ? end : Math.min(afterTarget.length, 80);
+  }
+
+  const searchRegion = afterTarget.substring(0, maxBoundary);
+  const deadLinkRegex = /\s*\{\{\s*dead[ _]?link\s*(?:\|[^{}]*)?\}\}/gi;
+
+  if (deadLinkRegex.test(searchRegion)) {
+    const cleanedRegion = searchRegion.replace(deadLinkRegex, "");
+    return wikitext.substring(0, idx + targetString.length) + cleanedRegion + afterTarget.substring(maxBoundary);
   }
 
   return wikitext;
