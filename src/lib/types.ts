@@ -154,6 +154,8 @@ export interface BotDefinition {
   capabilities: string[];
   defaultConfig: Record<string, any>;
   iconName: string;
+  enabled?: boolean;
+  route?: string;
 }
 
 export interface IABotDetailedStats {

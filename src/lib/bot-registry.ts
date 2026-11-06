@@ -4,7 +4,7 @@ export const AVAILABLE_BOTS: BotDefinition[] = [
   {
     number: 1,
     id: "internet-bot",
-    name: "InternetBot",
+    name: "InternetArchiveBot",
     tagline: "Link Rot Repair & Wayback Citation Guardian",
     version: "v2.5.0",
     description: "Crawls Justapedia pages, detects 404 dead external links, queries the Wayback Machine API, and patches citations with verified web archive snapshots.",
@@ -28,6 +28,8 @@ export const AVAILABLE_BOTS: BotDefinition[] = [
       cooldownSeconds: 60,
     },
     iconName: "ShieldCheck",
+    enabled: true,
+    route: "/bots/internet-bot",
   },
   {
     number: 2,
@@ -50,6 +52,8 @@ export const AVAILABLE_BOTS: BotDefinition[] = [
       cooldownSeconds: 60,
     },
     iconName: "Calendar",
+    enabled: false,
+    route: "/bots/birth-update-bot",
   },
   {
     number: 3,
@@ -72,6 +76,8 @@ export const AVAILABLE_BOTS: BotDefinition[] = [
       cooldownSeconds: 60,
     },
     iconName: "FileText",
+    enabled: false,
+    route: "/bots/citation-verifier-bot",
   },
   {
     number: 4,
@@ -94,8 +100,14 @@ export const AVAILABLE_BOTS: BotDefinition[] = [
       cooldownSeconds: 60,
     },
     iconName: "FolderKanban",
+    enabled: false,
+    route: "/bots/category-maintenance-bot",
   },
 ];
+
+export function getActiveBots(): BotDefinition[] {
+  return AVAILABLE_BOTS.filter((b) => b.enabled);
+}
 
 export function createInitialBotState(botId: string): BotState {
   const initialLogs: BotTerminalLog[] = [
