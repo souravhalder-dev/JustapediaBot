@@ -1,10 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import { fetchCategoryMembers } from "@/lib/justapedia";
+import { requireAuthorizedUser } from "@/lib/api-guard";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(req: NextRequest) {
   try {
+    const auth = await requireAuthorizedUser(req);
+    if (!auth.authorized) {
+      return auth.response;
+    }
+
     const category = req.nextUrl.searchParams.get("category") || "All articles with dead external links";
     const limit = parseInt(req.nextUrl.searchParams.get("limit") || "50", 10);
     const cmcontinue = req.nextUrl.searchParams.get("cmcontinue") || undefined;

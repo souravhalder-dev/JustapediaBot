@@ -4,8 +4,8 @@ import { executeBridgeRequest } from "./justapedia-bridge";
 
 const JUSTAPEDIA_API = "https://justapedia.org/api.php";
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
-const JWT_SECRET_STRING = process.env.JWT_SECRET || "48faa3a54d28680a66104aa5c94df471a857b200";
-const JWT_SECRET = new TextEncoder().encode(JWT_SECRET_STRING);
+export const JWT_SECRET_STRING = process.env.JWT_SECRET || "48faa3a54d28680a66104aa5c94df471a857b200";
+export const JWT_SECRET = new TextEncoder().encode(JWT_SECRET_STRING);
 
 const DEFAULT_HEADERS = {
   "User-Agent": USER_AGENT,

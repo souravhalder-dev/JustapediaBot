@@ -1,10 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requestWaybackSave } from "@/lib/wayback";
+import { requireAuthorizedUser } from "@/lib/api-guard";
 
 export const dynamic = 'force-dynamic';
 
 export async function POST(req: NextRequest) {
   try {
+    const auth = await requireAuthorizedUser(req);
+    if (!auth.authorized) {
+      return auth.response;
+    }
+
     const { url } = await req.json();
 
     if (!url || typeof url !== "string") {

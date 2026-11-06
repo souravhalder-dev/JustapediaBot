@@ -11,12 +11,16 @@ import {
   Globe2, 
   Sparkles,
   Clock,
-  ArrowRight
+  ArrowRight,
+  RefreshCw
 } from "lucide-react";
 import { UrlCheckResult } from "@/lib/types";
 import { formatTimestamp } from "@/lib/utils";
+import { useAuth } from "@/context/AuthContext";
+import { AuthGate } from "@/components/AuthGate";
 
 export default function InspectorPage() {
+  const { user, sessionToken, isLoading } = useAuth();
   const [urlInput, setUrlInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [savingArchive, setSavingArchive] = useState(false);
@@ -36,7 +40,10 @@ export default function InspectorPage() {
     try {
       const res = await fetch("/api/check-url", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}),
+        },
         body: JSON.stringify({ url: urlInput.trim() }),
       });
 
@@ -59,7 +66,10 @@ export default function InspectorPage() {
     try {
       const res = await fetch("/api/save-archive", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}),
+        },
         body: JSON.stringify({ url: result.url }),
       });
       const data = await res.json();
@@ -70,6 +80,26 @@ export default function InspectorPage() {
       setSavingArchive(false);
     }
   };
+
+  if (isLoading) {
+    return (
+      <div className="flex-1 w-full bg-slate-950 flex items-center justify-center py-24 text-slate-400">
+        <div className="flex items-center gap-3 text-sm">
+          <RefreshCw className="w-5 h-5 animate-spin text-indigo-500" />
+          <span>Verifying security permissions...</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (!user || (!user.is_bot && !user.is_admin)) {
+    return (
+      <AuthGate
+        title="URL Inspector Diagnostics Restricted"
+        description="The URL Inspector performs live external server probes and interfaces with Wayback snapshot services. Access is restricted exclusively to authenticated Justapedia users holding Bot or Administrator privileges."
+      />
+    );
+  }
 
   return (
     <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-10 w-full space-y-8">

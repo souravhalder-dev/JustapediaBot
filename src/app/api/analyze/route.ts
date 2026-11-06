@@ -4,6 +4,7 @@ import { extractLinksFromWikitext, generateFixedWikitext, formatArchiveDate } fr
 import { checkUrlHealth } from "@/lib/link-checker";
 import { checkWaybackAvailability } from "@/lib/wayback";
 import { ExtractedLink, PageAnalysisResult } from "@/lib/types";
+import { requireAuthorizedUser } from "@/lib/api-guard";
 
 export const maxDuration = 60; // 60s for Vercel serverless execution
 export const dynamic = 'force-dynamic';
@@ -12,6 +13,11 @@ export async function POST(req: NextRequest) {
   const startTime = Date.now();
 
   try {
+    const auth = await requireAuthorizedUser(req);
+    if (!auth.authorized) {
+      return auth.response;
+    }
+
     const body = await req.json();
     const { pageTitle, archiveAll = false, checkWayback = true } = body;
 

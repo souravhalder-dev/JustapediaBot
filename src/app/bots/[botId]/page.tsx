@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
 import { AVAILABLE_BOTS } from "@/lib/bot-registry";
+import { AuthGate } from "@/components/AuthGate";
 import {
   Play,
   Square,
@@ -37,7 +38,7 @@ export default function BotDedicatedDashboard() {
   const params = useParams();
   const router = useRouter();
   const botId = (params?.botId as string) || "internet-bot";
-  const { user, sessionToken, openAuthModal } = useAuth();
+  const { user, sessionToken, openAuthModal, isLoading } = useAuth();
 
   const botDef = AVAILABLE_BOTS.find((b) => b.id === botId) || AVAILABLE_BOTS[0];
 
@@ -150,8 +151,12 @@ export default function BotDedicatedDashboard() {
 
   // 1. Live Server Runner Polling
   const fetchStatus = async () => {
+    if (!sessionToken) return;
     try {
-      const res = await fetch(`/api/bot/status?botId=${botId}`, { cache: "no-store" });
+      const res = await fetch(`/api/bot/status?botId=${botId}`, {
+        headers: { Authorization: `Bearer ${sessionToken}` },
+        cache: "no-store",
+      });
       if (res.ok) {
         const data = await res.json();
         setRunnerState((prev) => ({
@@ -179,10 +184,11 @@ export default function BotDedicatedDashboard() {
   };
 
   useEffect(() => {
+    if (!sessionToken || !user) return;
     fetchStatus();
     const interval = setInterval(fetchStatus, 1200);
     return () => clearInterval(interval);
-  }, [botId]);
+  }, [botId, sessionToken, user]);
 
   // Auto-scroll terminal logs inside its container without scrolling the main browser window
   useEffect(() => {
@@ -193,6 +199,7 @@ export default function BotDedicatedDashboard() {
 
   // 2. Load History Data
   const fetchHistory = async () => {
+    if (!sessionToken) return;
     setIsLoadingHistory(true);
     try {
       const params = new URLSearchParams({
@@ -201,7 +208,10 @@ export default function BotDedicatedDashboard() {
         search: historySearch,
         status: historyStatusFilter,
       });
-      const res = await fetch(`/api/bot/history?${params.toString()}`, { cache: "no-store" });
+      const res = await fetch(`/api/bot/history?${params.toString()}`, {
+        headers: { Authorization: `Bearer ${sessionToken}` },
+        cache: "no-store",
+      });
       if (res.ok) {
         const data = await res.json();
         setHistoryEntries(data.entries || []);
@@ -393,6 +403,27 @@ export default function BotDedicatedDashboard() {
   const isRunning = runnerState.status === "RUNNING";
   const isPaused = runnerState.status === "PAUSED";
   const isStopped = runnerState.status === "STOPPED";
+
+  // Strict Authentication Guard: Protect all bot features & dashboards from unauthenticated viewers
+  if (isLoading) {
+    return (
+      <div className="flex-1 w-full bg-slate-950 flex items-center justify-center py-24">
+        <div className="flex items-center gap-3 text-slate-400 text-sm">
+          <RefreshCw className="w-5 h-5 animate-spin text-indigo-500" />
+          <span>Verifying security permissions...</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (!user || (!user.is_bot && !user.is_admin)) {
+    return (
+      <AuthGate
+        title={`${botDef.name} Dashboard Restricted`}
+        description={`The ${botDef.name} operations terminal, live queues, statistics, and configuration controls are strictly restricted to authenticated accounts with Bot or Administrator privileges.`}
+      />
+    );
+  }
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">

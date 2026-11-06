@@ -9,7 +9,8 @@ import {
   LogOut, 
   History, 
   BookOpen, 
-  ShieldCheck 
+  ShieldCheck,
+  Lock
 } from "lucide-react";
 
 export function Navbar() {
@@ -81,13 +82,19 @@ export function Navbar() {
                 </button>
               </div>
             ) : (
-              <button
-                onClick={openAuthModal}
-                className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-medium text-white shadow-md shadow-indigo-600/30 transition"
-              >
-                <LogIn className="w-3.5 h-3.5" />
-                <span>Log In</span>
-              </button>
+              <div className="flex items-center gap-2">
+                <span className="hidden sm:inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-400 text-[11px] font-semibold">
+                  <Lock className="w-3 h-3" />
+                  <span>Restricted Access</span>
+                </span>
+                <button
+                  onClick={openAuthModal}
+                  className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-medium text-white shadow-md shadow-indigo-600/30 transition"
+                >
+                  <LogIn className="w-3.5 h-3.5" />
+                  <span>Log In</span>
+                </button>
+              </div>
             )}
 
             {/* Wiki Link */}

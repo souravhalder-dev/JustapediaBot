@@ -1,10 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getArticleHistoryList, clearArticleHistory } from "@/lib/article-history";
+import { requireAuthorizedUser } from "@/lib/api-guard";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(req: NextRequest) {
   try {
+    const auth = await requireAuthorizedUser(req);
+    if (!auth.authorized) {
+      return auth.response;
+    }
+
     const page = parseInt(req.nextUrl.searchParams.get("page") || "1", 10);
     const limit = parseInt(req.nextUrl.searchParams.get("limit") || "50", 10);
     const search = req.nextUrl.searchParams.get("search") || "";
@@ -25,6 +31,11 @@ export async function GET(req: NextRequest) {
 
 export async function POST(req: NextRequest) {
   try {
+    const auth = await requireAuthorizedUser(req);
+    if (!auth.authorized) {
+      return auth.response;
+    }
+
     const body = await req.json().catch(() => ({}));
     if (body.action === "clear") {
       clearArticleHistory();

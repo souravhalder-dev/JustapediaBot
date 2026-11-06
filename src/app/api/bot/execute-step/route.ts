@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { executeBotFeature } from "@/lib/bot-actions";
 import { executeJustapediaEdit } from "@/lib/save-engine";
+import { requireAuthorizedUser } from "@/lib/api-guard";
 import {
   isArticleResolved,
   getResolvedArticleRecord,
@@ -11,18 +12,22 @@ export const dynamic = "force-dynamic";
 
 export async function POST(req: NextRequest) {
   try {
+    const body = await req.json().catch(() => ({}));
     const authHeader = req.headers.get("Authorization");
-    let sessionToken = "";
+    let explicitToken = "";
 
     if (authHeader && authHeader.startsWith("Bearer ")) {
-      sessionToken = authHeader.substring(7).trim();
+      explicitToken = authHeader.substring(7).trim();
+    }
+    if (!explicitToken && body.session_token) {
+      explicitToken = body.session_token;
     }
 
-    const body = await req.json();
-
-    if (!sessionToken && body.session_token) {
-      sessionToken = body.session_token;
+    const auth = await requireAuthorizedUser(req, explicitToken);
+    if (!auth.authorized) {
+      return auth.response;
     }
+    const sessionToken = auth.sessionToken;
 
     const { botId, articleTitle, use_sandbox = false, sandbox_title, options, force = false } = body;
 

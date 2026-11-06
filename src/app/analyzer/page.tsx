@@ -20,10 +20,13 @@ import {
 import { PageAnalysisResult, ExtractedLink } from "@/lib/types";
 import { DiffViewer } from "@/components/DiffViewer";
 import { ScanProgress } from "@/components/ScanProgress";
+import { useAuth } from "@/context/AuthContext";
+import { AuthGate } from "@/components/AuthGate";
 
 function AnalyzerContent() {
   const searchParams = useSearchParams();
   const initialPage = searchParams.get("page") || "";
+  const { user, sessionToken, isLoading } = useAuth();
 
   const [pageInput, setPageInput] = useState(initialPage);
   const [archiveAll, setArchiveAll] = useState(false);
@@ -58,7 +61,10 @@ function AnalyzerContent() {
     try {
       const res = await fetch("/api/analyze", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}),
+        },
         body: JSON.stringify({
           pageTitle: title.trim(),
           archiveAll,
@@ -85,6 +91,26 @@ function AnalyzerContent() {
     e.preventDefault();
     runAnalysis(pageInput);
   };
+
+  if (isLoading) {
+    return (
+      <div className="flex-1 w-full bg-slate-950 flex items-center justify-center py-24 text-slate-400">
+        <div className="flex items-center gap-3 text-sm">
+          <RefreshCw className="w-5 h-5 animate-spin text-indigo-500" />
+          <span>Verifying security permissions...</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (!user || (!user.is_bot && !user.is_admin)) {
+    return (
+      <AuthGate
+        title="Article Citation Analyzer Restricted"
+        description="The Article Citation Analyzer tool inspects live external references, queries archive databases, and generates proposed citation patches. Access is restricted exclusively to authenticated Justapedia users holding Bot or Administrator privileges."
+      />
+    );
+  }
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10 w-full space-y-8">

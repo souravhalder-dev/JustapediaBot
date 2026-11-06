@@ -1,21 +1,26 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerBotRunner } from "@/lib/server-bot-runner";
-import { verifyUserSession } from "@/lib/auth";
+import { requireAuthorizedUser } from "@/lib/api-guard";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(req: NextRequest) {
   try {
+    const body = await req.json().catch(() => ({}));
     const authHeader = req.headers.get("Authorization");
-    let sessionToken = "";
+    let explicitToken = "";
 
     if (authHeader && authHeader.startsWith("Bearer ")) {
-      sessionToken = authHeader.substring(7).trim();
+      explicitToken = authHeader.substring(7).trim();
+    }
+    if (!explicitToken && body.sessionToken) {
+      explicitToken = body.sessionToken;
     }
 
-    const body = await req.json();
-    if (!sessionToken && body.sessionToken) {
-      sessionToken = body.sessionToken;
+    // Require authenticated Bot or Administrator
+    const auth = await requireAuthorizedUser(req, explicitToken);
+    if (!auth.authorized) {
+      return auth.response;
     }
 
     const { action, options, title, count, category } = body;
@@ -23,24 +28,9 @@ export async function POST(req: NextRequest) {
 
     switch (action) {
       case "start": {
-        if (!sessionToken) {
-          return NextResponse.json(
-            { success: false, message: "Authentication required: Please log in to start the bot." },
-            { status: 401 }
-          );
-        }
-
-        const verify = await verifyUserSession(sessionToken);
-        if (!verify.valid || !verify.user) {
-          return NextResponse.json(
-            { success: false, message: verify.error || "Authentication session invalid. Please log in again." },
-            { status: 403 }
-          );
-        }
-
         const res = await runner.start({
-          sessionToken,
-          operatorUsername: verify.user.username || "Operator",
+          sessionToken: auth.sessionToken,
+          operatorUsername: auth.user.username || "Operator",
           options,
         });
 

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { executeJustapediaEdit } from "@/lib/save-engine";
+import { requireAuthorizedUser } from "@/lib/api-guard";
 import { SaveArticleRequest } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -7,28 +8,23 @@ export const dynamic = "force-dynamic";
 export async function POST(req: NextRequest) {
   try {
     const authHeader = req.headers.get("Authorization");
-    let sessionToken = "";
+    let explicitToken = "";
 
     if (authHeader && authHeader.startsWith("Bearer ")) {
-      sessionToken = authHeader.substring(7).trim();
+      explicitToken = authHeader.substring(7).trim();
     }
 
-    const body = await req.json();
+    const body = await req.json().catch(() => ({}));
 
-    if (!sessionToken && body.session_token) {
-      sessionToken = body.session_token;
+    if (!explicitToken && body.session_token) {
+      explicitToken = body.session_token;
     }
 
-    if (!sessionToken) {
-      return NextResponse.json(
-        {
-          success: false,
-          title: body.title || "Unknown",
-          message: "Authentication required: Please log in with your Justapedia account to save edits.",
-        },
-        { status: 401 }
-      );
+    const auth = await requireAuthorizedUser(req, explicitToken);
+    if (!auth.authorized) {
+      return auth.response;
     }
+    const sessionToken = auth.sessionToken;
 
     if (!body.title || typeof body.wikitext !== "string") {
       return NextResponse.json(

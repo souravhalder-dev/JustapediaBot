@@ -11,8 +11,13 @@ export async function GET(req: NextRequest) {
     if (authHeader && authHeader.startsWith("Bearer ")) {
       token = authHeader.substring(7).trim();
     } else {
-      const urlToken = req.nextUrl.searchParams.get("token");
-      if (urlToken) token = urlToken;
+      const cookieVal = req.cookies.get("justapedia_session")?.value;
+      if (cookieVal) {
+        token = cookieVal.trim();
+      } else {
+        const urlToken = req.nextUrl.searchParams.get("token");
+        if (urlToken) token = urlToken;
+      }
     }
 
     if (!token) {

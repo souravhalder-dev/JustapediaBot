@@ -3,11 +3,17 @@ import { checkUrlHealth } from "@/lib/link-checker";
 import { checkWaybackAvailability } from "@/lib/wayback";
 import { extractDomain } from "@/lib/utils";
 import { UrlCheckResult } from "@/lib/types";
+import { requireAuthorizedUser } from "@/lib/api-guard";
 
 export const dynamic = 'force-dynamic';
 
 export async function POST(req: NextRequest) {
   try {
+    const auth = await requireAuthorizedUser(req);
+    if (!auth.authorized) {
+      return auth.response;
+    }
+
     const { url } = await req.json();
 
     if (!url || typeof url !== "string") {

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { executeJustapediaEdit } from "@/lib/save-engine";
+import { requireAuthorizedUser } from "@/lib/api-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -9,25 +10,24 @@ const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 export async function POST(req: NextRequest) {
   try {
     const authHeader = req.headers.get("Authorization");
-    let sessionToken = "";
+    let explicitToken = "";
 
     if (authHeader && authHeader.startsWith("Bearer ")) {
-      sessionToken = authHeader.substring(7).trim();
+      explicitToken = authHeader.substring(7).trim();
     }
 
-    const body = await req.json();
-    if (!sessionToken && body.session_token) {
-      sessionToken = body.session_token;
+    const body = await req.json().catch(() => ({}));
+    if (!explicitToken && body.session_token) {
+      explicitToken = body.session_token;
     }
+
+    const auth = await requireAuthorizedUser(req, explicitToken);
+    if (!auth.authorized) {
+      return auth.response;
+    }
+    const sessionToken = auth.sessionToken;
 
     const { title = "Grace Hopper", revid = 2000019960 } = body;
-
-    if (!sessionToken) {
-      return NextResponse.json(
-        { success: false, message: "Please log in to restore the article." },
-        { status: 401 }
-      );
-    }
 
     // 1. Fetch exact historical revision wikitext
     const revUrl = `${JUSTAPEDIA_API}?action=query&revids=${revid}&prop=revisions&rvslots=main&rvprop=content&format=json`;

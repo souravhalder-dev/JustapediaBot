@@ -2,7 +2,9 @@
 
 import { useState, useEffect } from "react";
 import { motion } from "framer-motion";
-import { Globe, Plus, Trash2, Search, ShieldCheck, Lock, ExternalLink } from "lucide-react";
+import { Globe, Plus, Trash2, Search, ShieldCheck, Lock, ExternalLink, RefreshCw } from "lucide-react";
+import { useAuth } from "@/context/AuthContext";
+import { AuthGate } from "@/components/AuthGate";
 
 interface DomainRule {
   domain: string;
@@ -21,6 +23,7 @@ const DEFAULT_RULES: DomainRule[] = [
 ];
 
 export default function DomainsPage() {
+  const { user, isLoading } = useAuth();
   const [rules, setRules] = useState<DomainRule[]>(DEFAULT_RULES);
   const [searchTerm, setSearchTerm] = useState("");
   const [newDomain, setNewDomain] = useState("");
@@ -81,6 +84,26 @@ export default function DomainsPage() {
       r.domain.toLowerCase().includes(searchTerm.toLowerCase()) ||
       r.note.toLowerCase().includes(searchTerm.toLowerCase())
   );
+
+  if (isLoading) {
+    return (
+      <div className="flex-1 w-full bg-slate-950 flex items-center justify-center py-24 text-slate-400">
+        <div className="flex items-center gap-3 text-sm">
+          <RefreshCw className="w-5 h-5 animate-spin text-indigo-500" />
+          <span>Verifying security permissions...</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (!user || (!user.is_bot && !user.is_admin)) {
+    return (
+      <AuthGate
+        title="Domain Rules Management Restricted"
+        description="Configuring domain handling policies, paywall bypass rules, and archiving exclusion lists is restricted exclusively to authenticated Justapedia users holding Bot or Administrator privileges."
+      />
+    );
+  }
 
   return (
     <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-10 w-full space-y-8">

@@ -1,7 +1,9 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { Settings2, Save, Check, RotateCcw, ShieldCheck, Database, Globe } from "lucide-react";
+import { Settings2, Save, Check, RotateCcw, ShieldCheck, Database, Globe, RefreshCw } from "lucide-react";
+import { useAuth } from "@/context/AuthContext";
+import { AuthGate } from "@/components/AuthGate";
 
 interface BotConfig {
   deadLinkTemplate: string;
@@ -24,6 +26,7 @@ const DEFAULT_CONFIG: BotConfig = {
 };
 
 export default function SettingsPage() {
+  const { user, isLoading } = useAuth();
   const [config, setConfig] = useState<BotConfig>(DEFAULT_CONFIG);
   const [saved, setSaved] = useState(false);
 
@@ -59,6 +62,26 @@ export default function SettingsPage() {
       console.error(e);
     }
   };
+
+  if (isLoading) {
+    return (
+      <div className="flex-1 w-full bg-slate-950 flex items-center justify-center py-24 text-slate-400">
+        <div className="flex items-center gap-3 text-sm">
+          <RefreshCw className="w-5 h-5 animate-spin text-indigo-500" />
+          <span>Verifying security permissions...</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (!user || (!user.is_bot && !user.is_admin)) {
+    return (
+      <AuthGate
+        title="Bot Configuration Settings Restricted"
+        description="Configuring global bot templates, MediaWiki API integration, and edit summary policies is restricted exclusively to authenticated Justapedia users holding Bot or Administrator privileges."
+      />
+    );
+  }
 
   return (
     <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-10 w-full space-y-8">

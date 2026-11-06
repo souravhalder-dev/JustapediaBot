@@ -1,10 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerBotRunner } from "@/lib/server-bot-runner";
+import { requireAuthorizedUser } from "@/lib/api-guard";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(req: NextRequest) {
   try {
+    const auth = await requireAuthorizedUser(req);
+    if (!auth.authorized) {
+      return auth.response;
+    }
+
     const runner = getServerBotRunner();
     const state = runner.getState();
 

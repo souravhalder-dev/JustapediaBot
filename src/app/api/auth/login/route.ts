@@ -22,7 +22,20 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(result, { status: isForbidden ? 403 : 401 });
     }
 
-    return NextResponse.json(result);
+    const response = NextResponse.json(result);
+
+    // Set secure HttpOnly session cookie for edge middleware & browser navigations
+    if (result.session_token) {
+      response.cookies.set("justapedia_session", result.session_token, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "lax",
+        path: "/",
+        maxAge: 7 * 24 * 60 * 60, // 7 days
+      });
+    }
+
+    return response;
   } catch (error: any) {
     return NextResponse.json(
       {

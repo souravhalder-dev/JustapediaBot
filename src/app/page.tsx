@@ -1,7 +1,8 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, Suspense } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
 import { getActiveBots } from "@/lib/bot-registry";
 import {
@@ -19,13 +20,20 @@ import {
   CheckCircle2,
   Calendar,
   Layers,
+  LogIn,
+  ShieldAlert,
+  KeyRound,
+  RefreshCw,
+  AlertTriangle,
 } from "lucide-react";
 
-export default function HomePage() {
-  const { user, sessionToken, openAuthModal } = useAuth();
+function HomeContent() {
+  const { user, sessionToken, openAuthModal, isLoading } = useAuth();
+  const searchParams = useSearchParams();
+  const authQuery = searchParams.get("auth");
   const activeBots = getActiveBots();
 
-  // Live status for InternetArchiveBot
+  // Live status for InternetArchiveBot (only polled when authenticated)
   const [runnerState, setRunnerState] = useState<{
     status: "RUNNING" | "PAUSED" | "STOPPED";
     currentCycleEdits: number;
@@ -44,11 +52,18 @@ export default function HomePage() {
 
   const [isToggling, setIsToggling] = useState(false);
 
-  // Poll server state
+  // Poll server state ONLY when authenticated with Bot or Admin rights
   useEffect(() => {
+    if (!user || !sessionToken || (!user.is_bot && !user.is_admin)) {
+      return;
+    }
+
     const fetchStatus = async () => {
       try {
-        const res = await fetch("/api/bot/status?botId=internet-bot", { cache: "no-store" });
+        const res = await fetch("/api/bot/status?botId=internet-bot", {
+          headers: { Authorization: `Bearer ${sessionToken}` },
+          cache: "no-store",
+        });
         if (res.ok) {
           const data = await res.json();
           setRunnerState({
@@ -68,7 +83,7 @@ export default function HomePage() {
     fetchStatus();
     const timer = setInterval(fetchStatus, 1500);
     return () => clearInterval(timer);
-  }, []);
+  }, [user, sessionToken]);
 
   const handleQuickToggle = async (e: React.MouseEvent) => {
     e.preventDefault();
@@ -114,21 +129,165 @@ export default function HomePage() {
   const isPaused = runnerState.status === "PAUSED";
   const isStopped = runnerState.status === "STOPPED";
 
+  // Loading skeleton while verifying session
+  if (isLoading) {
+    return (
+      <div className="flex-1 w-full bg-slate-950 flex items-center justify-center py-28 text-slate-400">
+        <div className="flex items-center gap-3 text-sm">
+          <RefreshCw className="w-5 h-5 animate-spin text-indigo-500" />
+          <span>Verifying security permissions...</span>
+        </div>
+      </div>
+    );
+  }
+
+  // --------------------------------------------------------------------------
+  // STATE A: Unauthenticated or Unauthorized (All bot features completely hidden)
+  // --------------------------------------------------------------------------
+  if (!user || (!user.is_bot && !user.is_admin)) {
+    return (
+      <div className="flex-1 w-full bg-slate-950 text-slate-100 py-16 px-4">
+        <div className="max-w-4xl mx-auto space-y-8 animate-in fade-in duration-300">
+          
+          {/* Security Notice Alert if redirected */}
+          {authQuery && (
+            <div className="p-4 rounded-2xl bg-amber-950/40 border border-amber-500/40 text-amber-200 text-xs flex items-center gap-3 shadow-lg">
+              <AlertTriangle className="w-5 h-5 text-amber-400 flex-shrink-0" />
+              <div>
+                <strong className="block font-semibold">
+                  {authQuery === "expired"
+                    ? "Session Expired"
+                    : authQuery === "forbidden"
+                    ? "Access Denied: Insufficient Privileges"
+                    : "Authentication Required"}
+                </strong>
+                <span>
+                  {authQuery === "expired"
+                    ? "Your Justapedia login session has expired. Please sign in again with your Bot or Administrator account."
+                    : authQuery === "forbidden"
+                    ? "Only Justapedia accounts with Bot or Administrator rights are authorized to access this suite."
+                    : "You must be logged in with a Justapedia Bot or Administrator account to access the requested bot dashboard."}
+                </span>
+              </div>
+            </div>
+          )}
+
+          {/* Secure Restricted Portal Banner */}
+          <div className="p-8 sm:p-12 rounded-3xl bg-gradient-to-b from-slate-900 via-slate-900 to-slate-950 border border-slate-800 shadow-2xl text-center space-y-8 relative overflow-hidden">
+            {/* Top Glow Accent */}
+            <div className="absolute top-0 left-1/2 -translate-x-1/2 w-96 h-32 bg-indigo-500/10 blur-3xl pointer-events-none" />
+
+            {/* Lock Emblem */}
+            <div className="relative inline-flex">
+              <div className="w-20 h-20 rounded-3xl bg-indigo-600/10 border border-indigo-500/30 flex items-center justify-center text-indigo-400 shadow-xl shadow-indigo-950/50">
+                <Lock className="w-10 h-10" />
+              </div>
+              <div className="absolute -bottom-1.5 -right-1.5 w-7 h-7 rounded-full bg-emerald-500 border-2 border-slate-900 flex items-center justify-center text-slate-950">
+                <KeyRound className="w-4 h-4" />
+              </div>
+            </div>
+
+            {/* Headline */}
+            <div className="space-y-3 max-w-2xl mx-auto">
+              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-indigo-500/10 border border-indigo-500/20 text-indigo-300 text-xs font-semibold">
+                <ShieldCheck className="w-3.5 h-3.5 text-indigo-400" />
+                <span>Restricted Access &bull; Justapedia Automated Bot Suite</span>
+              </div>
+              <h1 className="text-3xl sm:text-5xl font-black text-white tracking-tight">
+                Authentication Required
+              </h1>
+              <p className="text-slate-400 text-sm sm:text-base leading-relaxed">
+                Before logging in, all bot operations, live execution terminals, processing queues, and configuration controls remain completely hidden to preserve encyclopedia integrity.
+              </p>
+            </div>
+
+            {/* Login CTA Button */}
+            <div className="pt-2 max-w-sm mx-auto">
+              <button
+                onClick={openAuthModal}
+                className="w-full py-4 px-6 rounded-2xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-sm transition shadow-xl shadow-indigo-900/40 hover:shadow-indigo-900/60 flex items-center justify-center gap-2.5 group"
+              >
+                <LogIn className="w-5 h-5 group-hover:scale-110 transition-transform" />
+                <span>Log In with Justapedia Account</span>
+              </button>
+              <p className="text-[11px] text-slate-500 mt-2.5">
+                Authenticates directly against Justapedia MediaWiki Action API
+              </p>
+            </div>
+
+            {/* Security Pillars Cards */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-6 border-t border-slate-800 text-left">
+              <div className="p-4 rounded-xl bg-slate-950/60 border border-slate-800/80 space-y-1.5">
+                <div className="flex items-center gap-2 font-bold text-xs text-white">
+                  <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                  <span>Strict RBAC</span>
+                </div>
+                <p className="text-[11px] text-slate-400 leading-relaxed">
+                  Restricted exclusively to users with verified <code className="text-indigo-300">bot</code> or <code className="text-indigo-300">sysop</code> / <code className="text-indigo-300">bureaucrat</code> rights.
+                </p>
+              </div>
+
+              <div className="p-4 rounded-xl bg-slate-950/60 border border-slate-800/80 space-y-1.5">
+                <div className="flex items-center gap-2 font-bold text-xs text-white">
+                  <KeyRound className="w-4 h-4 text-indigo-400" />
+                  <span>Signed JWT Sessions</span>
+                </div>
+                <p className="text-[11px] text-slate-400 leading-relaxed">
+                  Stateless cryptographic authentication tokens verified by server-side Edge middleware on every request.
+                </p>
+              </div>
+
+              <div className="p-4 rounded-xl bg-slate-950/60 border border-slate-800/80 space-y-1.5">
+                <div className="flex items-center gap-2 font-bold text-xs text-white">
+                  <Lock className="w-4 h-4 text-amber-400" />
+                  <span>Shielded Backend</span>
+                </div>
+                <p className="text-[11px] text-slate-400 leading-relaxed">
+                  All backend API routes, bot controls, and queues are protected against direct or unauthorized calls.
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // --------------------------------------------------------------------------
+  // STATE B: Authenticated & Authorized Operator (Display Bot Portal)
+  // --------------------------------------------------------------------------
   return (
     <div className="flex-1 w-full bg-slate-950 text-slate-100 py-10">
-      {/* Hero Welcome */}
       <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 space-y-10">
-        <div className="space-y-3">
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-indigo-500/10 border border-indigo-500/20 text-indigo-300 text-xs font-medium">
-            <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
-            <span>Autonomous Server-Side Execution &bull; 24/7/365 Continuous Operation</span>
+        
+        {/* Operator Welcome Header */}
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-6 border-b border-slate-800">
+          <div className="space-y-2">
+            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-semibold">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+              <span>Authorized Operator Session Active</span>
+            </div>
+            <h2 className="text-3xl sm:text-4xl font-extrabold text-white tracking-tight">
+              Active Justapedia Bots
+            </h2>
+            <p className="text-slate-400 text-sm max-w-2xl leading-relaxed">
+              Select a bot below to open its dedicated dashboard, monitor live progress, inspect article history, and manage background operations.
+            </p>
           </div>
-          <h2 className="text-3xl sm:text-4xl font-extrabold text-white tracking-tight">
-            Active Justapedia Bots
-          </h2>
-          <p className="text-slate-400 text-sm max-w-2xl leading-relaxed">
-            Select a bot below to open its dedicated dashboard, monitor live progress, inspect article history, and control server operations.
-          </p>
+
+          <div className="flex items-center gap-3">
+            <div className="p-3 rounded-xl bg-slate-900 border border-slate-800 text-xs space-y-0.5">
+              <span className="text-slate-400 block text-[10px] uppercase font-mono">Operator</span>
+              <div className="flex items-center gap-1.5 font-bold text-white">
+                <span className="text-emerald-400 font-mono">@{user.username}</span>
+                {user.role_badge && (
+                  <span className="px-1.5 py-0.2 rounded text-[10px] bg-indigo-500/20 text-indigo-300 font-mono border border-indigo-500/30">
+                    {user.role_badge}
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
         </div>
 
         {/* Bot Cards Grid */}
@@ -273,5 +432,19 @@ export default function HomePage() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function HomePage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex-1 w-full bg-slate-950 flex items-center justify-center py-28 text-slate-400">
+          <RefreshCw className="w-5 h-5 animate-spin text-indigo-500" />
+        </div>
+      }
+    >
+      <HomeContent />
+    </Suspense>
   );
 }
