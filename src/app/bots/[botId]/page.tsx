@@ -139,8 +139,8 @@ export default function BotDedicatedDashboard() {
     setEditedOptions(runnerState.options);
   }, [runnerState.options]);
 
-  // Terminal scroll ref
-  const terminalLogsEndRef = useRef<HTMLDivElement>(null);
+  // Terminal container scroll ref (contained inside the terminal, never scrolling the main page)
+  const terminalContainerRef = useRef<HTMLDivElement>(null);
   const [autoScroll, setAutoScroll] = useState(true);
 
   // 1. Live Server Runner Polling
@@ -177,12 +177,12 @@ export default function BotDedicatedDashboard() {
     return () => clearInterval(interval);
   }, [botId]);
 
-  // Auto-scroll terminal logs
+  // Auto-scroll terminal logs inside its container without scrolling the main browser window
   useEffect(() => {
-    if (autoScroll && terminalLogsEndRef.current) {
-      terminalLogsEndRef.current.scrollIntoView({ behavior: "smooth" });
+    if (activeTab === "terminal" && autoScroll && terminalContainerRef.current) {
+      terminalContainerRef.current.scrollTop = terminalContainerRef.current.scrollHeight;
     }
-  }, [runnerState.logs, autoScroll]);
+  }, [runnerState.logs.length, autoScroll, activeTab]);
 
   // 2. Load History Data
   const fetchHistory = async () => {
@@ -737,8 +737,11 @@ export default function BotDedicatedDashboard() {
               </div>
             </div>
 
-            {/* Terminal Log Output */}
-            <div className="flex-1 p-4 font-mono text-xs overflow-y-auto space-y-2 bg-slate-950">
+            {/* Terminal Log Output - Scrolled internally without touching window scroll */}
+            <div
+              ref={terminalContainerRef}
+              className="flex-1 p-4 font-mono text-xs overflow-y-auto space-y-2 bg-slate-950 scroll-smooth"
+            >
               {runnerState.logs.length === 0 ? (
                 <div className="text-slate-600 italic p-4 text-center">
                   No log activity recorded yet. Start the bot to begin processing.
@@ -791,7 +794,6 @@ export default function BotDedicatedDashboard() {
                   );
                 })
               )}
-              <div ref={terminalLogsEndRef} />
             </div>
           </div>
         )}
