@@ -154,6 +154,14 @@ export function articleNeedsArchival(wikitext: string): boolean {
     }
   }
 
+  // 4. Misplaced templates outside </ref> or duplicate consecutive tags needing single-pass resolution
+  if (/<\/ref\s*>\s*\{\{(?:webarchive|dead[ _]?link|wayback)/i.test(wikitext)) {
+    return true;
+  }
+  if (/(\{\{(?:webarchive|dead[ _]?link|wayback)[^}]*\}\})\s*(\{\{(?:webarchive|dead[ _]?link|wayback)[^}]*\}\})/i.test(wikitext)) {
+    return true;
+  }
+
   return false;
 }
 

@@ -224,6 +224,9 @@ class ServerBotRunner {
       message: `[STARTED] InternetArchiveBot activated by @${params.operatorUsername}. High-speed 100 edits/min worker pool engaged.`,
     });
 
+    // Auto-prioritize any unhandled affected articles from audit for immediate single-pass cleanup
+    this.queueAffectedArticles();
+
     this.persistState();
     this.startLoop();
 
@@ -356,6 +359,47 @@ class ServerBotRunner {
       message: `Cleared ${count} item(s) from the pending queue.`,
     });
     this.persistState();
+  }
+
+  /**
+   * Enqueue all articles previously identified as having duplicate tags or misplaced templates
+   * to resolve them in a clean, single-pass operation.
+   */
+  public queueAffectedArticles(): number {
+    try {
+      const affectedPath = path.join(process.cwd(), "affected_articles.json");
+      if (fs.existsSync(affectedPath)) {
+        const raw = fs.readFileSync(affectedPath, "utf-8");
+        const affectedMap = JSON.parse(raw);
+        const titles = Object.keys(affectedMap);
+        let addedCount = 0;
+
+        const unhandled: string[] = [];
+        for (const title of titles) {
+          const norm = title.trim().toLowerCase();
+          if (!this.sessionProcessedTitles.has(norm) && !this.state.queue.includes(title)) {
+            const eligibility = isArticleEligibleForCheck(title);
+            if (eligibility.eligible) {
+              unhandled.push(title);
+              addedCount++;
+            }
+          }
+        }
+
+        if (unhandled.length > 0) {
+          this.state.queue = [...unhandled, ...this.state.queue];
+          this.addLog({
+            level: "info",
+            message: `[PRIORITY AUDIT QUEUE] Prioritized ${unhandled.length} affected articles for duplicate tag cleanup & single-pass resolution.`,
+          });
+          this.persistState();
+        }
+        return addedCount;
+      }
+    } catch (err) {
+      console.warn("[SERVER RUNNER] Failed to load affected_articles.json:", err);
+    }
+    return 0;
   }
 
   public resetStats(): void {

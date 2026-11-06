@@ -83,6 +83,17 @@ export async function POST(req: NextRequest) {
         });
       }
 
+      case "queue-affected":
+      case "cleanup-duplicates": {
+        const added = runner.queueAffectedArticles();
+        return NextResponse.json({
+          success: true,
+          added,
+          message: `Prioritized ${added} affected article(s) in queue for clean single-pass resolution.`,
+          state: runner.getState(),
+        });
+      }
+
       case "reset-stats": {
         runner.resetStats();
         return NextResponse.json({

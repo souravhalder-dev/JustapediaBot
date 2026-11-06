@@ -429,51 +429,85 @@ export async function processArticleWithIABot(
 
 /**
  * Deduplicate and clean misplaced archive and dead link templates in wikitext:
- * 1. Move any {{webarchive}} sitting outside </ref> back inside <ref>
+ * 1. Move any {{webarchive}} or {{wayback}} sitting outside </ref> back inside <ref>
  * 2. Strip obsolete {{dead link}} templates inside or outside references that already have archives
  * 3. Move misplaced {{dead link}} outside </ref> back inside <ref>
- * 4. Deduplicate consecutive duplicate {{webarchive}} or {{dead link}} templates anywhere
+ * 4. Strip {{dead link}} immediately before or after {{webarchive}} / {{wayback}}
+ * 5. Deduplicate multiple {{webarchive}} or {{dead link}} inside the same <ref> tag
+ * 6. Deduplicate consecutive duplicate templates anywhere in the article
  */
 export function cleanupWikitextDuplicateTemplates(wikitext: string): string {
   let cleaned = wikitext;
 
-  // 1. Fix any <ref> followed by misplaced {{webarchive}} templates outside </ref>
-  const refOutsideWaRegex = /(<ref(?:\s+[^>]*)?>)([\s\S]*?)(<\/ref>)((?:\s*\{\{\s*webarchive\s*\|[^{}]*\}\})+)/gi;
+  // 1. Move misplaced {{webarchive}} / {{wayback}} outside </ref> back inside <ref>
+  const refOutsideWaRegex = /(<ref(?:\s+[^>]*)?>)([\s\S]*?)(<\/ref\s*>)((?:\s*\{\{\s*(?:webarchive|wayback)\s*\|[^{}]*\}\})+)/gi;
   cleaned = cleaned.replace(refOutsideWaRegex, (_match, refOpen, inner, refClose, trailingWa) => {
     let cleanInner = inner.replace(/\s*\{\{\s*dead[ _]?link\s*(?:\|[^{}]*)?\}\}/gi, "").trim();
-    const firstWaMatch = trailingWa.match(/\{\{\s*webarchive\s*\|[^{}]*\}\}/i);
+    const firstWaMatch = trailingWa.match(/\{\{\s*(?:webarchive|wayback)\s*\|[^{}]*\}\}/i);
     const waTag = firstWaMatch ? firstWaMatch[0].trim() : "";
-    if (!cleanInner.toLowerCase().includes("{{webarchive") && waTag) {
+    if (!/\{\{\s*(?:webarchive|wayback)/i.test(cleanInner) && waTag) {
       cleanInner = `${cleanInner} ${waTag}`;
     }
     return `${refOpen}${cleanInner}${refClose}`;
   });
 
-  // 2. Fix any <ref> followed by misplaced {{dead link}} templates outside </ref>
-  const refOutsideDlRegex = /(<ref(?:\s+[^>]*)?>)([\s\S]*?)(<\/ref>)((?:\s*\{\{\s*dead[ _]?link\s*(?:\|[^{}]*)?\}\})+)/gi;
+  // 2. Move misplaced {{dead link}} outside </ref> back inside <ref> (or strip if ref has archive)
+  const refOutsideDlRegex = /(<ref(?:\s+[^>]*)?>)([\s\S]*?)(<\/ref\s*>)((?:\s*\{\{\s*dead[ _]?link\s*(?:\|[^{}]*)?\}\})+)/gi;
   cleaned = cleaned.replace(refOutsideDlRegex, (_match, refOpen, inner, refClose, trailingDl) => {
-    // If reference already has an archive link, dead link is obsolete: strip it completely!
-    const hasArchive = /\|\s*(?:archive-?url|archive_url)\s*=\s*https?:\/\/|\{\{\s*webarchive/i.test(inner);
+    const hasArchive = /\|\s*(?:archive-?url|archive_url)\s*=\s*https?:\/\/|\{\{\s*(?:webarchive|wayback)/i.test(inner);
     if (hasArchive) {
       return `${refOpen}${inner}${refClose}`;
     }
-    // Otherwise, move exactly ONE dead link inside <ref>
     const firstDl = trailingDl.match(/\{\{\s*dead[ _]?link\s*(?:\|[^{}]*)?\}\}/i);
     const dlTag = firstDl ? firstDl[0].trim() : "";
     let cleanInner = inner.replace(/\s*\{\{\s*dead[ _]?link\s*(?:\|[^{}]*)?\}\}/gi, "").trim();
-    if (dlTag && !cleanInner.toLowerCase().includes("{{dead link") && !cleanInner.toLowerCase().includes("{{deadlink")) {
+    if (dlTag && !/\{\{\s*dead[ _]?link/i.test(cleanInner)) {
       cleanInner = `${cleanInner} ${dlTag}`;
     }
     return `${refOpen}${cleanInner}${refClose}`;
   });
 
-  // 3. Remove consecutive duplicate {{webarchive}} templates anywhere
-  const duplicateWaRegex = /(\{\{\s*webarchive\s*\|[^{}]*\}\})(\s*\{\{\s*webarchive\s*\|[^{}]*\}\})+/gi;
-  cleaned = cleaned.replace(duplicateWaRegex, "$1");
+  // 3. Strip dead link immediately before or after webarchive / wayback anywhere
+  cleaned = cleaned.replace(
+    /\{\{\s*dead[ _]?link\s*(?:\|[^{}]*)?\}\}\s*(\{\{\s*(?:webarchive|wayback)\s*\|[^{}]*\}\})/gi,
+    "$1"
+  );
+  cleaned = cleaned.replace(
+    /(\{\{\s*(?:webarchive|wayback)\s*\|[^{}]*\}\})\s*\{\{\s*dead[ _]?link\s*(?:\|[^{}]*)?\}\}/gi,
+    "$1"
+  );
 
-  // 4. Remove consecutive duplicate {{dead link}} templates anywhere
-  const duplicateDlRegex = /(\{\{\s*dead[ _]?link\s*(?:\|[^{}]*)?\}\})(\s*\{\{\s*dead[ _]?link\s*(?:\|[^{}]*)?\}\})+/gi;
-  cleaned = cleaned.replace(duplicateDlRegex, "$1");
+  // 4. Inside every <ref ...> ... </ref>, sanitize and consolidate
+  const singleRefRegex = /(<ref(?:\s+[^>]*)?>)([\s\S]*?)(<\/ref\s*>)/gi;
+  cleaned = cleaned.replace(singleRefRegex, (_match, refOpen, inner, refClose) => {
+    const hasArchive = /\|\s*(?:archive-?url|archive_url)\s*=\s*https?:\/\/|\{\{\s*(?:webarchive|wayback)/i.test(inner);
+    if (hasArchive) {
+      // Strip any {{dead link}} inside ref
+      inner = inner.replace(/\s*\{\{\s*dead[ _]?link\s*(?:\|[^{}]*)?\}\}/gi, "");
+    }
+
+    // Deduplicate multiple {{dead link}} inside ref: keep at most one
+    const dlMatches = inner.match(/\{\{\s*dead[ _]?link\s*(?:\|[^{}]*)?\}\}/gi);
+    if (dlMatches && dlMatches.length > 1) {
+      const firstDl = dlMatches[0];
+      inner = inner.replace(/\s*\{\{\s*dead[ _]?link\s*(?:\|[^{}]*)?\}\}/gi, "");
+      inner = `${inner.trim()} ${firstDl}`;
+    }
+
+    // Deduplicate multiple {{webarchive}} or {{wayback}} inside ref: keep at most one
+    const waMatches = inner.match(/\{\{\s*(?:webarchive|wayback)\s*\|[^{}]*\}\}/gi);
+    if (waMatches && waMatches.length > 1) {
+      const firstWa = waMatches[0];
+      inner = inner.replace(/\s*\{\{\s*(?:webarchive|wayback)\s*\|[^{}]*\}\}/gi, "");
+      inner = `${inner.trim()} ${firstWa}`;
+    }
+
+    return `${refOpen}${inner}${refClose}`;
+  });
+
+  // 5. Clean any consecutive identical templates in main body text
+  cleaned = cleaned.replace(/(\{\{\s*dead[ _]?link\s*(?:\|[^{}]*)?\}\}\s*)\1+/gi, "$1");
+  cleaned = cleaned.replace(/(\{\{\s*(?:webarchive|wayback)\s*\|[^{}]*\}\}\s*)\1+/gi, "$1");
 
   return cleaned;
 }

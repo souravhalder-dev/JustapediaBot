@@ -1,6 +1,7 @@
 import { SaveArticleRequest, SaveArticleResponse } from "./types";
 import { formatCookieHeader, verifyUserSession } from "./auth";
 import { executeBridgeRequest } from "./justapedia-bridge";
+import { cleanupWikitextDuplicateTemplates } from "./iabot-engine";
 
 const JUSTAPEDIA_API = "https://justapedia.org/api.php";
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
@@ -184,12 +185,15 @@ export async function executeJustapediaEdit(
 
     // Determine target title and wikitext
     let targetTitle = title.trim();
-    let textToSave = wikitext;
+    // System-Wide Pre-Save Deduplication & Sanitization Shield
+    // Ensures NO bot can ever save misplaced templates outside </ref>,
+    // duplicate consecutive tags, or {{dead link}} on archived references.
+    let textToSave = cleanupWikitextDuplicateTemplates(wikitext);
     let finalSummary = summary.trim();
 
     if (use_sandbox) {
       targetTitle = sandbox_title || `User:${actualUsername}/sandbox`;
-      textToSave = `<!-- TEST DRAFT FOR [${title}] VIA JUSTAPEDIA BOT SUITE -->\n{{Please leave this line alone (sandbox heading)}}\n\n${wikitext}`;
+      textToSave = `<!-- TEST DRAFT FOR [${title}] VIA JUSTAPEDIA BOT SUITE -->\n{{Please leave this line alone (sandbox heading)}}\n\n${textToSave}`;
       finalSummary = `[TEST] Draft for ${title}: ${summary}`;
     }
 

@@ -362,6 +362,21 @@ export default function BotDedicatedDashboard() {
     }
   };
 
+  const handleQueueAffected = async () => {
+    try {
+      const res = await fetch("/api/bot/control", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "queue-affected", botId }),
+      });
+      const data = await res.json();
+      setActionNotice(data.message || `Prioritized ${data.added || 0} affected articles in queue.`);
+      fetchStatus();
+    } catch (err: any) {
+      setActionNotice(`Error: ${err.message}`);
+    }
+  };
+
   const handleSaveOptions = async () => {
     try {
       const res = await fetch("/api/bot/control", {
@@ -1094,6 +1109,13 @@ export default function BotDedicatedDashboard() {
                   >
                     <Zap className="w-3.5 h-3.5" />
                     <span>Crawl Template:Dead link (500+ Active)</span>
+                  </button>
+                  <button
+                    onClick={handleQueueAffected}
+                    className="px-3 py-1.5 rounded-lg bg-amber-600/20 hover:bg-amber-600/30 text-amber-300 border border-amber-500/30 text-xs font-semibold flex items-center gap-1.5 transition"
+                  >
+                    <ShieldCheck className="w-3.5 h-3.5" />
+                    <span>Prioritize 255 Affected Articles (Clean Duplicates)</span>
                   </button>
                 </div>
               </div>
