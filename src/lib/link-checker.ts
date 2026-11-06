@@ -62,8 +62,8 @@ function isSoft404Redirect(initialUrl: string, finalUrl?: string): boolean {
  */
 export async function checkUrlHealth(
   url: string,
-  timeoutMs: number = 4500,
-  maxRetries: number = 1
+  timeoutMs: number = 2500,
+  maxRetries: number = 0
 ): Promise<LinkCheckOutcome> {
   const cached = urlCheckCache.get(url);
   if (cached) return cached;

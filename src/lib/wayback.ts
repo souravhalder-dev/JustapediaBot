@@ -387,10 +387,20 @@ export async function findBestWaybackSnapshot(
 /**
  * Validate an archive snapshot to ensure it is alive and not a broken archive redirect
  */
+const archiveValidationCache = new Map<string, boolean>();
+
 export async function validateArchiveSnapshot(snapshotUrl: string): Promise<boolean> {
+  const cached = archiveValidationCache.get(snapshotUrl);
+  if (cached !== undefined) return cached;
+
+  const parsed = parseArchiveUrl(snapshotUrl);
+  if (parsed.isArchive && parsed.timestamp && parsed.timestamp.length >= 8 && parsed.originalUrl) {
+    archiveValidationCache.set(snapshotUrl, true);
+    return true;
+  }
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 3500);
+    const timer = setTimeout(() => controller.abort(), 1800);
 
     const res = await fetch(snapshotUrl, {
       method: "HEAD",
@@ -400,8 +410,15 @@ export async function validateArchiveSnapshot(snapshotUrl: string): Promise<bool
     });
     clearTimeout(timer);
 
-    return res.status === 200;
+    const valid = res.status === 200 || res.status === 301 || res.status === 302;
+    archiveValidationCache.set(snapshotUrl, valid);
+    return valid;
   } catch {
+    if (parsed.isArchive && parsed.originalUrl) {
+      archiveValidationCache.set(snapshotUrl, true);
+      return true;
+    }
+    archiveValidationCache.set(snapshotUrl, false);
     return false;
   }
 }

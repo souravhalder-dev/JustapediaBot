@@ -29,6 +29,8 @@ export interface BotRunnerState {
   totalSkipped: number;
   totalErrors: number;
   queue: string[];
+  activeArticle: string | null;
+  activePhase: string | null;
   options: {
     useSandbox: boolean;
     archiveWorkingLinks: boolean;
@@ -75,6 +77,8 @@ function createDefaultState(): BotRunnerState {
       "Apollo 11",
       "Voyager 1",
     ],
+    activeArticle: null,
+    activePhase: "Idle",
     options: {
       useSandbox: false,
       archiveWorkingLinks: false,
@@ -122,7 +126,7 @@ class ServerBotRunner {
           level: "info",
           message: "Server restarted: Automatically resuming continuous background bot operation.",
         });
-        setTimeout(() => this.startLoop(), 1000);
+        setTimeout(() => this.startLoop(), 500);
       } else {
         this.state.status = "STOPPED";
         this.persistState();
@@ -138,6 +142,8 @@ class ServerBotRunner {
         return {
           ...createDefaultState(),
           ...parsed,
+          activeArticle: null,
+          activePhase: "Idle",
           options: {
             ...createDefaultState().options,
             ...(parsed.options || {}),
@@ -181,7 +187,7 @@ class ServerBotRunner {
   }
 
   private async interruptibleSleep(ms: number): Promise<void> {
-    const interval = 100;
+    const interval = 50;
     const steps = Math.ceil(ms / interval);
     for (let i = 0; i < steps; i++) {
       if (this.stopRequested || this.state.status === "STOPPED") break;
@@ -207,11 +213,13 @@ class ServerBotRunner {
 
     this.state.status = "RUNNING";
     this.state.pauseUntil = null;
+    this.state.activeArticle = null;
+    this.state.activePhase = "Starting";
     this.state.startedAt = new Date().toISOString();
 
     this.addLog({
       level: "info",
-      message: `[STARTED] InternetArchiveBot server worker activated by @${params.operatorUsername}. Continuous processing engaged.`,
+      message: `[STARTED] InternetArchiveBot activated by @${params.operatorUsername}. Fast autonomous processing engaged.`,
     });
 
     this.persistState();
@@ -232,6 +240,8 @@ class ServerBotRunner {
     this.stopRequested = true;
     this.state.status = "STOPPED";
     this.state.pauseUntil = null;
+    this.state.activeArticle = null;
+    this.state.activePhase = "Stopped";
 
     this.addLog({
       level: "warn",
@@ -260,19 +270,10 @@ class ServerBotRunner {
       const members = res.members || [];
 
       let added = 0;
-      const existingQueueSet = new Set(this.state.queue.map((t) => t.toLowerCase()));
-
-      for (const title of members) {
-        if (!title) continue;
-        const norm = title.toLowerCase();
-        // Exclude if already in queue or already verified clean
-        if (!existingQueueSet.has(norm)) {
-          const elig = isArticleEligibleForCheck(title);
-          if (elig.eligible) {
-            this.state.queue.push(title);
-            existingQueueSet.add(norm);
-            added++;
-          }
+      for (const m of members) {
+        if (!this.state.queue.includes(m)) {
+          this.state.queue.push(m);
+          added++;
         }
       }
 
@@ -324,6 +325,8 @@ class ServerBotRunner {
     this.state.totalChecked = 0;
     this.state.totalSkipped = 0;
     this.state.totalErrors = 0;
+    this.state.activeArticle = null;
+    this.state.activePhase = "Idle";
     this.state.detailedStats = {
       articlesProcessed: 0,
       referencesChecked: 0,
@@ -387,6 +390,8 @@ class ServerBotRunner {
         // 1. COOLDOWN PAUSE HANDLING (60-second burst break)
         // -------------------------------------------------------------
         if (this.state.pauseUntil && now < this.state.pauseUntil) {
+          this.state.activeArticle = null;
+          this.state.activePhase = "Rest Break";
           await this.interruptibleSleep(500);
           continue;
         }
@@ -397,6 +402,7 @@ class ServerBotRunner {
           this.state.currentCycleEdits = 0;
           this.state.cycleNumber += 1;
           this.state.status = "RUNNING";
+          this.state.activePhase = "Resuming";
 
           this.addLog({
             level: "cycle",
@@ -415,16 +421,25 @@ class ServerBotRunner {
         }
 
         if (this.state.queue.length === 0) {
+          this.state.activeArticle = null;
+          this.state.activePhase = "Awaiting articles";
           this.addLog({
             level: "info",
             message: `[QUEUE IDLE] Awaiting next articles from category members...`,
           });
-          await this.interruptibleSleep(3000);
+          await this.interruptibleSleep(2000);
           continue;
         }
 
         // Pop next article from queue
         const articleTitle = this.state.queue.shift()!;
+        this.state.activeArticle = articleTitle;
+        this.state.activePhase = "Inspecting citations";
+        this.addLog({
+          level: "info",
+          articleTitle,
+          message: `[PROCESSING] Inspecting "${articleTitle}" for broken archives and dead links...`,
+        });
         this.persistState();
 
         if (this.stopRequested) break;
@@ -441,6 +456,8 @@ class ServerBotRunner {
             articleTitle,
             message: `Could not retrieve "${articleTitle}" from Justapedia API: ${fetchErr.message}`,
           });
+          this.state.activeArticle = null;
+          this.state.activePhase = "Idle";
           continue;
         }
 
@@ -450,6 +467,8 @@ class ServerBotRunner {
             articleTitle,
             message: `Article "${articleTitle}" does not exist or has empty wikitext on Justapedia. Skipped.`,
           });
+          this.state.activeArticle = null;
+          this.state.activePhase = "Idle";
           continue;
         }
 
@@ -464,7 +483,10 @@ class ServerBotRunner {
             articleTitle,
             message: `[DUPLICATE SHIELD] "${articleTitle}" (rev #${currentRevid}): ${eligibility.reason}`,
           });
-          await this.interruptibleSleep(300);
+          this.state.activeArticle = null;
+          this.state.activePhase = "Idle";
+          this.persistState();
+          await this.interruptibleSleep(100);
           continue;
         }
 
@@ -488,6 +510,8 @@ class ServerBotRunner {
             articleTitle,
             message: `Processing error on "${articleTitle}": ${procErr.message || String(procErr)}`,
           });
+          this.state.activeArticle = null;
+          this.state.activePhase = "Idle";
           continue;
         }
 
@@ -516,7 +540,10 @@ class ServerBotRunner {
             message: `[VERIFIED HEALTHY] "${articleTitle}" (${botResult.stats.referencesChecked} refs inspected). Zero issues found. Skipped without modifying.`,
           });
 
-          await this.interruptibleSleep(400);
+          this.state.activeArticle = null;
+          this.state.activePhase = "Idle";
+          this.persistState();
+          await this.interruptibleSleep(100);
           continue;
         }
 
@@ -528,8 +555,13 @@ class ServerBotRunner {
             message: `Authentication required: Cannot save edits to "${articleTitle}". Operator session missing.`,
           });
           this.state.status = "STOPPED";
+          this.state.activeArticle = null;
+          this.state.activePhase = "Stopped";
           break;
         }
+
+        this.state.activePhase = "Saving to Justapedia";
+        this.persistState();
 
         const editSummary =
           botResult.summary ||
@@ -557,6 +589,8 @@ class ServerBotRunner {
             articleTitle,
             message: `Save exception on "${articleTitle}": ${saveErr.message || String(saveErr)}`,
           });
+          this.state.activeArticle = null;
+          this.state.activePhase = "Idle";
           continue;
         }
 
@@ -571,12 +605,16 @@ class ServerBotRunner {
 
           if (saveRes.message?.includes("Authentication") || saveRes.message?.includes("expired")) {
             this.state.status = "STOPPED";
+            this.state.activeArticle = null;
+            this.state.activePhase = "Stopped";
             this.addLog({
               level: "error",
               message: `[SESSION EXPIRED] Operator login credentials have expired. Bot halted. Please re-login.`,
             });
             break;
           }
+          this.state.activeArticle = null;
+          this.state.activePhase = "Idle";
           continue;
         }
 
@@ -618,6 +656,8 @@ class ServerBotRunner {
           diffUrl: saveRes.diff_url,
         });
 
+        this.state.activeArticle = null;
+        this.state.activePhase = "Idle";
         this.persistState();
 
         // -------------------------------------------------------------
@@ -626,6 +666,8 @@ class ServerBotRunner {
         if (this.state.currentCycleEdits >= 100) {
           this.state.status = "PAUSED";
           this.state.pauseUntil = Date.now() + 60000; // Exactly 60 seconds
+          this.state.activeArticle = null;
+          this.state.activePhase = "60s Break";
 
           this.addLog({
             level: "cycle",
@@ -636,11 +678,13 @@ class ServerBotRunner {
           continue;
         }
 
-        // Pacing delay (500ms) between article operations
-        await this.interruptibleSleep(500);
+        // Pacing delay (100ms) between article operations for maximum bot speed
+        await this.interruptibleSleep(100);
       }
     } finally {
       this.isLoopRunning = false;
+      this.state.activeArticle = null;
+      this.state.activePhase = "Stopped";
       this.persistState();
     }
   }

@@ -22,6 +22,12 @@ export interface BridgeResponse<T = any> {
 const BRIDGE_URL = "http://127.0.0.1:5005";
 const SCRIPT_PATH = path.join(process.cwd(), "scripts", "justapedia_bridge.py");
 
+// In serverless environments (Vercel, AWS), daemon & python subprocess are not present.
+// Bypass them instantly to eliminate multi-second connection timeouts.
+const IS_SERVERLESS = Boolean(process.env.VERCEL || process.env.AWS_REGION || process.env.VERCEL_ENV);
+let localDaemonFailed = IS_SERVERLESS;
+let pythonCliFailed = IS_SERVERLESS;
+
 /**
  * Direct Node.js fetch fallback (used in serverless environments like Vercel where Python is unavailable).
  */
@@ -114,68 +120,82 @@ async function executeDirectFetch<T>(req: BridgeRequest): Promise<BridgeResponse
 export async function executeBridgeRequest<T = any>(
   req: BridgeRequest
 ): Promise<BridgeResponse<T>> {
-  // 1. Try local daemon service for speed (~50-400ms)
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 2000);
-
-    const daemonResp = await fetch(BRIDGE_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(req),
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
-
-    if (daemonResp.ok) {
-      const json: BridgeResponse<T> = await daemonResp.json();
-      return json;
-    }
-  } catch {
-    // Daemon not running or timed out; proceed to Python subprocess
+  // 1. Fast direct fetch for serverless or when local daemons are unavailable
+  if (localDaemonFailed && pythonCliFailed) {
+    return executeDirectFetch<T>(req);
   }
 
-  // 2. Direct Python subprocess fallback
-  const cliPromise = new Promise<BridgeResponse<T> | null>((resolve) => {
+  // 2. Try local daemon service for speed (~50-400ms)
+  if (!localDaemonFailed) {
     try {
-      const py = spawn("python", [SCRIPT_PATH]);
-      let stdout = "";
-      let stderr = "";
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 800);
 
-      py.on("error", () => {
-        // Python not installed or not in PATH (e.g. Vercel Serverless)
-        resolve(null);
+      const daemonResp = await fetch(BRIDGE_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req),
+        signal: controller.signal,
       });
+      clearTimeout(timeout);
 
-      py.stdout.on("data", (d) => (stdout += d));
-      py.stderr.on("data", (d) => (stderr += d));
-
-      py.on("close", (code) => {
-        if (code !== 0) {
-          resolve(null);
-          return;
-        }
-
-        try {
-          const parsed: BridgeResponse<T> = JSON.parse(stdout);
-          resolve(parsed);
-        } catch {
-          resolve(null);
-        }
-      });
-
-      py.stdin.write(JSON.stringify(req));
-      py.stdin.end();
+      if (daemonResp.ok) {
+        const json: BridgeResponse<T> = await daemonResp.json();
+        return json;
+      } else {
+        localDaemonFailed = true;
+      }
     } catch {
-      resolve(null);
+      localDaemonFailed = true;
     }
-  });
-
-  const cliResult = await cliPromise;
-  if (cliResult) {
-    return cliResult;
   }
 
-  // 3. Fallback to direct fetch (for Vercel / Cloud serverless environments)
+  // 3. Direct Python subprocess fallback (local environments only)
+  if (!pythonCliFailed) {
+    const cliPromise = new Promise<BridgeResponse<T> | null>((resolve) => {
+      try {
+        const py = spawn("python", [SCRIPT_PATH]);
+        let stdout = "";
+        let stderr = "";
+
+        py.on("error", () => {
+          pythonCliFailed = true;
+          resolve(null);
+        });
+
+        py.stdout.on("data", (d) => (stdout += d));
+        py.stderr.on("data", (d) => (stderr += d));
+
+        py.on("close", (code) => {
+          if (code !== 0) {
+            pythonCliFailed = true;
+            resolve(null);
+            return;
+          }
+
+          try {
+            const parsed: BridgeResponse<T> = JSON.parse(stdout);
+            resolve(parsed);
+          } catch {
+            pythonCliFailed = true;
+            resolve(null);
+          }
+        });
+
+        py.stdin.write(JSON.stringify(req));
+        py.stdin.end();
+      } catch {
+        pythonCliFailed = true;
+        resolve(null);
+      }
+    });
+
+    const cliResult = await cliPromise;
+    if (cliResult) {
+      return cliResult;
+    }
+  }
+
+  // 4. Fallback to direct fetch
   return executeDirectFetch<T>(req);
 }

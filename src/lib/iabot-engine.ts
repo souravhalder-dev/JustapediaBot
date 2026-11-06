@@ -103,157 +103,178 @@ export async function processArticleWithIABot(
   const links = extractLinksFromWikitext(currentWikitext);
   const linksToProcess = links.slice(0, maxLinksPerPage);
 
-  for (const item of linksToProcess) {
-    stats.referencesChecked++;
+  interface LinkItemFix {
+    target: string;
+    replacement: string;
+    statType: "added" | "repaired" | "tagged";
+    detail: string;
+    removeDeadTag?: boolean;
+  }
 
-    // ------------------------------------------------------------------------
-    // CASE A: Citation already has an archive link -> Check for repair & date integrity
-    // ------------------------------------------------------------------------
-    if (item.citationTemplate?.archiveUrl && repairBrokenArchives) {
-      const existingArchive = item.citationTemplate.archiveUrl;
-      const existingArchiveDate = item.citationTemplate.archiveDate;
-      const isAlive = await validateArchiveSnapshot(existingArchive);
+  // 2. Process all references in parallel with Promise.all for high-performance bot execution
+  const results = await Promise.all(
+    linksToProcess.map(async (item): Promise<LinkItemFix | null> => {
+      // ------------------------------------------------------------------------
+      // CASE A: Citation already has an archive link -> Check for repair & date integrity
+      // ------------------------------------------------------------------------
+      if (item.citationTemplate?.archiveUrl && repairBrokenArchives) {
+        const existingArchive = item.citationTemplate.archiveUrl;
+        const existingArchiveDate = item.citationTemplate.archiveDate;
+        const isAlive = await validateArchiveSnapshot(existingArchive);
 
-      if (!isAlive) {
-        // Attempt to repair broken archive by finding alternative CDX capture
-        const replacement = await repairBrokenArchiveUrl(existingArchive, item.url);
-        if (replacement && replacement.available) {
-          const sampleDate = item.citationTemplate?.citationDate || item.citationTemplate?.accessDate;
-          const newArchiveDate = formatWaybackDate(replacement.timestamp, sampleDate);
-          const patched = patchCitationTemplate(
-            item.citationTemplate,
-            replacement.url,
-            newArchiveDate,
-            "dead"
-          );
+        if (!isAlive) {
+          // Attempt to repair broken archive by finding alternative CDX capture
+          const replacement = await repairBrokenArchiveUrl(existingArchive, item.url);
+          if (replacement && replacement.available) {
+            const sampleDate = item.citationTemplate?.citationDate || item.citationTemplate?.accessDate;
+            const newArchiveDate = formatWaybackDate(replacement.timestamp, sampleDate);
+            const patched = patchCitationTemplate(
+              item.citationTemplate,
+              replacement.url,
+              newArchiveDate,
+              "dead"
+            );
 
-          if (patched !== item.citationTemplate.rawString) {
-            currentWikitext = currentWikitext.replace(item.citationTemplate.rawString, patched);
-            stats.archiveLinksRepaired++;
-            details.push(`Repaired broken archive on "${item.url}" -> ${replacement.url} (${newArchiveDate})`);
-            continue;
+            if (patched !== item.citationTemplate.rawString) {
+              return {
+                target: item.citationTemplate.rawString,
+                replacement: patched,
+                statType: "repaired",
+                detail: `Repaired broken archive on "${item.url}" -> ${replacement.url} (${newArchiveDate})`,
+              };
+            }
+          }
+        } else if (isMalformedArchiveDate(existingArchiveDate)) {
+          // Existing archive URL is alive, but archive-date is corrupted (e.g. merged "2013-05-14 24, 2019") or missing
+          const parsedArch = parseArchiveUrl(existingArchive);
+          let fixedDate = "";
+          const sampleDate = item.citationTemplate?.citationDate || item.citationTemplate?.accessDate || existingArchiveDate;
+          if (parsedArch.timestamp) {
+            fixedDate = formatWaybackDate(parsedArch.timestamp, sampleDate);
+          } else {
+            const snap = await findBestWaybackSnapshot(item.url, sampleDate);
+            if (snap && snap.available) {
+              fixedDate = formatWaybackDate(snap.timestamp, sampleDate);
+            }
+          }
+
+          if (fixedDate) {
+            const patched = patchCitationTemplate(
+              item.citationTemplate,
+              existingArchive,
+              fixedDate,
+              item.citationTemplate.urlStatus || "dead"
+            );
+
+            if (patched !== item.citationTemplate.rawString) {
+              return {
+                target: item.citationTemplate.rawString,
+                replacement: patched,
+                statType: "repaired",
+                detail: `Repaired corrupted archive-date in {{${item.citationTemplate.templateName}}} on "${item.url}" -> ${fixedDate}`,
+              };
+            }
           }
         }
-      } else if (isMalformedArchiveDate(existingArchiveDate)) {
-        // Existing archive URL is alive, but archive-date is corrupted (e.g. merged "2013-05-14 24, 2019") or missing
-        const parsedArch = parseArchiveUrl(existingArchive);
-        let fixedDate = "";
-        const sampleDate = item.citationTemplate?.citationDate || item.citationTemplate?.accessDate || existingArchiveDate;
-        if (parsedArch.timestamp) {
-          fixedDate = formatWaybackDate(parsedArch.timestamp, sampleDate);
-        } else {
-          const snap = await findBestWaybackSnapshot(item.url, sampleDate);
-          if (snap && snap.available) {
-            fixedDate = formatWaybackDate(snap.timestamp, sampleDate);
-          }
-        }
-
-        if (fixedDate) {
-          const patched = patchCitationTemplate(
-            item.citationTemplate,
-            existingArchive,
-            fixedDate,
-            item.citationTemplate.urlStatus || "dead"
-          );
-
-          if (patched !== item.citationTemplate.rawString) {
-            currentWikitext = currentWikitext.replace(item.citationTemplate.rawString, patched);
-            stats.archiveLinksRepaired++;
-            details.push(`Repaired corrupted archive-date in {{${item.citationTemplate.templateName}}} on "${item.url}" -> ${fixedDate}`);
-            continue;
-          }
-        }
-      } else {
-        // Existing archive is healthy and date is valid; no modification needed
-        continue;
+        return null;
       }
-    }
 
-    // ------------------------------------------------------------------------
-    // CASE B: Check original URL health
-    // ------------------------------------------------------------------------
-    const health = await checkUrlHealth(item.url);
+      // ------------------------------------------------------------------------
+      // CASE B: Check original URL health
+      // ------------------------------------------------------------------------
+      const health = await checkUrlHealth(item.url);
 
-    // ------------------------------------------------------------------------
-    // CASE C: URL is DEAD (404, 410, DNS fail, Connection refused, or soft 404)
-    // ------------------------------------------------------------------------
-    if (health.isPermanentDead) {
+      // ------------------------------------------------------------------------
+      // CASE C: URL is DEAD (404, 410, DNS fail, Connection refused, or soft 404)
+      // ------------------------------------------------------------------------
+      if (health.isPermanentDead) {
+        // Search Wayback Machine CDX API for best snapshot (matching citation date if present)
+        const targetDate = item.citationDate || item.accessDate;
+        const snapshot = await findBestWaybackSnapshot(item.url, targetDate);
+
+        if (snapshot && snapshot.available) {
+          const sampleDate = item.citationTemplate?.archiveDate || item.citationTemplate?.citationDate || item.citationTemplate?.accessDate || targetDate;
+          const archiveDate = formatWaybackDate(snapshot.timestamp, sampleDate);
+
+          if (item.citationTemplate) {
+            // 1. Patch Citation Template ({{cite web}}, {{cite news}}, etc.)
+            const patched = patchCitationTemplate(
+              item.citationTemplate,
+              snapshot.url,
+              archiveDate,
+              "dead"
+            );
+
+            if (patched !== item.citationTemplate.rawString) {
+              return {
+                target: item.citationTemplate.rawString,
+                replacement: patched,
+                statType: "added",
+                detail: `Rescued dead link in {{${item.citationTemplate.templateName}}} on "${item.url}" with Wayback snapshot (${archiveDate})`,
+                removeDeadTag: true,
+              };
+            }
+          } else if (item.linkType === "reference" || item.linkType === "external") {
+            // 2. Patch Bare Reference or External Link with {{webarchive}}
+            const webArchiveTag = ` {{webarchive |url=${snapshot.url} |date=${archiveDate}}}`;
+            if (!item.rawString.includes("{{webarchive") && !item.rawString.includes("archive.org")) {
+              const patched = `${item.rawString}${webArchiveTag}`;
+              return {
+                target: item.rawString,
+                replacement: patched,
+                statType: "added",
+                detail: `Rescued dead link with {{webarchive}} on "${item.url}" (${archiveDate})`,
+                removeDeadTag: true,
+              };
+            }
+          }
+        } else if (tagUnrecoverableDead && !item.hasDeadTag) {
+          // No archive snapshot exists anywhere on Wayback: Tag as unrecoverable dead link
+          const tagged = tagDeadLink(item.rawString);
+          if (tagged !== item.rawString) {
+            return {
+              target: item.rawString,
+              replacement: tagged,
+              statType: "tagged",
+              detail: `Tagged unrecoverable dead link on "${item.url}" with {{dead link}}`,
+            };
+          }
+        }
+        return null;
+      }
+
+      // ------------------------------------------------------------------------
+      // CASE D: URL is ALIVE -> Archive Working Links (if enabled)
+      // ------------------------------------------------------------------------
+      if (health.status === "alive" && archiveWorkingLinks && !item.hasArchive) {
+        requestWaybackSave(item.url).catch(() => {});
+      }
+
+      return null;
+    })
+  );
+
+  // Apply all patches in memory
+  stats.referencesChecked = linksToProcess.length;
+  for (const res of results) {
+    if (!res) continue;
+    if (res.statType === "added") {
+      stats.archiveLinksAdded++;
       stats.deadLinksDetected++;
-
-      // Search Wayback Machine CDX API for best snapshot (matching citation date if present)
-      const targetDate = item.citationDate || item.accessDate;
-      const snapshot = await findBestWaybackSnapshot(item.url, targetDate);
-
-      if (snapshot && snapshot.available) {
-        const sampleDate = item.citationTemplate?.archiveDate || item.citationTemplate?.citationDate || item.citationTemplate?.accessDate || targetDate;
-        const archiveDate = formatWaybackDate(snapshot.timestamp, sampleDate);
-
-        if (item.citationTemplate) {
-          // 1. Patch Citation Template ({{cite web}}, {{cite news}}, etc.)
-          const patched = patchCitationTemplate(
-            item.citationTemplate,
-            snapshot.url,
-            archiveDate,
-            "dead"
-          );
-
-          if (patched !== item.citationTemplate.rawString) {
-            currentWikitext = currentWikitext.replace(item.citationTemplate.rawString, patched);
-            // Remove obsolete {{dead link}} tag if it was placed after the template
-            currentWikitext = removeDeadLinkTag(currentWikitext, patched);
-            stats.archiveLinksAdded++;
-            details.push(`Rescued dead link in {{${item.citationTemplate.templateName}}} on "${item.url}" with Wayback snapshot (${archiveDate})`);
-          }
-        } else if (item.linkType === "reference" || item.linkType === "external") {
-          // 2. Patch Bare Reference or External Link with {{webarchive}}
-          const webArchiveTag = ` {{webarchive |url=${snapshot.url} |date=${archiveDate}}}`;
-          if (!item.rawString.includes("{{webarchive") && !item.rawString.includes("archive.org")) {
-            const patched = `${item.rawString}${webArchiveTag}`;
-            currentWikitext = currentWikitext.replace(item.rawString, patched);
-            currentWikitext = removeDeadLinkTag(currentWikitext, patched);
-            stats.archiveLinksAdded++;
-            details.push(`Rescued dead link with {{webarchive}} on "${item.url}" (${archiveDate})`);
-          }
-        }
-      } else if (tagUnrecoverableDead && !item.hasDeadTag) {
-        // No archive snapshot exists anywhere on Wayback: Tag as unrecoverable dead link
-        const tagged = tagDeadLink(item.rawString);
-        if (tagged !== item.rawString) {
-          currentWikitext = currentWikitext.replace(item.rawString, tagged);
-          stats.unrecoverableLinksTagged++;
-          details.push(`Tagged unrecoverable dead link on "${item.url}" with {{dead link}}`);
-        }
-      }
-      continue;
     }
+    if (res.statType === "repaired") {
+      stats.archiveLinksRepaired++;
+    }
+    if (res.statType === "tagged") {
+      stats.unrecoverableLinksTagged++;
+      stats.deadLinksDetected++;
+    }
+    details.push(res.detail);
 
-    // ------------------------------------------------------------------------
-    // CASE D: URL is ALIVE -> Archive Working Links (if enabled)
-    // ------------------------------------------------------------------------
-    if (health.status === "alive" && archiveWorkingLinks && !item.hasArchive) {
-      // 1. Request new snapshot via Wayback Save Page Now
-      const saveRes = await requestWaybackSave(item.url);
-      if (saveRes.success) {
-        stats.newSnapshotsRequested++;
-      }
-
-      // 2. Look for existing or recent snapshot to add proactive archive
-      const snapshot = await findBestWaybackSnapshot(item.url);
-      if (snapshot && snapshot.available && item.citationTemplate) {
-        const sampleDate = item.citationTemplate?.citationDate || item.citationTemplate?.accessDate;
-        const archiveDate = formatWaybackDate(snapshot.timestamp, sampleDate);
-        const patched = patchCitationTemplate(
-          item.citationTemplate,
-          snapshot.url,
-          archiveDate,
-          "live" // Set url-status=live for working reference
-        );
-
-        if (patched !== item.citationTemplate.rawString) {
-          currentWikitext = currentWikitext.replace(item.citationTemplate.rawString, patched);
-          stats.archiveLinksAdded++;
-          details.push(`Archived working reference in {{${item.citationTemplate.templateName}}} on "${item.url}" (${archiveDate}, url-status=live)`);
-        }
+    if (currentWikitext.includes(res.target)) {
+      currentWikitext = currentWikitext.replace(res.target, res.replacement);
+      if (res.removeDeadTag) {
+        currentWikitext = removeDeadLinkTag(currentWikitext, res.replacement);
       }
     }
   }

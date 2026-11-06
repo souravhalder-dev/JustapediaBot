@@ -30,6 +30,7 @@ import {
   RotateCcw,
   Sliders,
   Check,
+  Zap,
 } from "lucide-react";
 
 export default function BotDedicatedDashboard() {
@@ -55,6 +56,8 @@ export default function BotDedicatedDashboard() {
     totalSkipped: number;
     totalErrors: number;
     queue: string[];
+    activeArticle: string | null;
+    activePhase: string | null;
     options: {
       useSandbox: boolean;
       archiveWorkingLinks: boolean;
@@ -93,6 +96,8 @@ export default function BotDedicatedDashboard() {
     totalSkipped: 0,
     totalErrors: 0,
     queue: [],
+    activeArticle: null,
+    activePhase: "Idle",
     options: {
       useSandbox: false,
       archiveWorkingLinks: false,
@@ -161,6 +166,8 @@ export default function BotDedicatedDashboard() {
           totalSkipped: data.totalSkipped,
           totalErrors: data.totalErrors,
           queue: data.queue || [],
+          activeArticle: data.activeArticle || null,
+          activePhase: data.activePhase || null,
           options: data.options || prev.options,
           detailedStats: data.detailedStats || prev.detailedStats,
           logs: data.logs || [],
@@ -221,7 +228,12 @@ export default function BotDedicatedDashboard() {
     }
 
     setIsControlling(true);
-    setActionNotice(null);
+    setActionNotice("Starting InternetArchiveBot... Engaging continuous background mode.");
+    setRunnerState((prev) => ({
+      ...prev,
+      status: "RUNNING",
+      activePhase: "Starting engine...",
+    }));
     try {
       const res = await fetch("/api/bot/control", {
         method: "POST",
@@ -478,6 +490,59 @@ export default function BotDedicatedDashboard() {
             >
               Dismiss
             </button>
+          </div>
+        )}
+
+        {/* Live Active Processing Card */}
+        {isRunning && (
+          <div className="p-4 rounded-2xl bg-gradient-to-r from-emerald-950/40 via-indigo-950/30 to-slate-900 border border-emerald-500/30 shadow-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 animate-in fade-in">
+            <div className="flex items-center gap-3">
+              <div className="relative flex h-3.5 w-3.5 flex-shrink-0">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-3.5 w-3.5 bg-emerald-500"></span>
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-bold uppercase tracking-wider text-emerald-400 flex items-center gap-1.5">
+                    <Zap className="w-3.5 h-3.5 fill-current" />
+                    <span>Active Processing</span>
+                  </span>
+                  <span className="px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-300 font-mono text-[10px] border border-emerald-500/20">
+                    {runnerState.activePhase || "Inspecting"}
+                  </span>
+                </div>
+                <div className="text-sm font-semibold text-white mt-0.5 flex items-center gap-2">
+                  <span className="text-slate-400 text-xs">Target Article:</span>
+                  {runnerState.activeArticle ? (
+                    <a
+                      href={`https://justapedia.org/${encodeURIComponent(runnerState.activeArticle.replace(/ /g, "_"))}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-indigo-300 hover:text-indigo-200 underline font-mono font-bold"
+                    >
+                      {runnerState.activeArticle}
+                    </a>
+                  ) : (
+                    <span className="text-slate-400 italic text-xs font-normal">Awaiting next in queue...</span>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-4 text-xs font-mono text-slate-300 bg-slate-900/80 px-3.5 py-2 rounded-xl border border-slate-800 flex-shrink-0">
+              <div>
+                <span className="text-slate-500 block text-[10px] uppercase">Cycle</span>
+                <span className="font-bold text-white">#{runnerState.cycleNumber}</span>
+              </div>
+              <div className="border-l border-slate-800 pl-4">
+                <span className="text-slate-500 block text-[10px] uppercase">Burst</span>
+                <span className="font-bold text-emerald-400">{runnerState.currentCycleEdits}/100</span>
+              </div>
+              <div className="border-l border-slate-800 pl-4">
+                <span className="text-slate-500 block text-[10px] uppercase">Queue</span>
+                <span className="font-bold text-indigo-300">{runnerState.queue.length}</span>
+              </div>
+            </div>
           </div>
         )}
 
