@@ -87,7 +87,7 @@ function normalizeTemplateName(name: string): string {
 }
 
 function isValidHttpUrl(str: string): boolean {
-  return /^https?:\/\/[^\s<>"'\]]+$/i.test(str.trim());
+  return /^https?:\/\/[^\s<>"'\]|{}]+$/i.test(str.trim());
 }
 
 /**
@@ -261,14 +261,20 @@ export function extractLinksFromWikitext(wikitext: string): ParsedItem[] {
     const rawString = match[0];
     const refContent = match[1];
 
+    // If this ref already contains a recognized citation template, skip bare URL extraction
+    // because citation templates are already extracted with full parameter precision in Step 1.
+    if (/\{\{\s*(?:cite|citation|web reference)\b/i.test(refContent)) {
+      continue;
+    }
+
     // Check for any misplaced trailing {{webarchive}} or {{dead link}} templates immediately following </ref>
     const postRefSlice = wikitext.substring(match.index + rawString.length, match.index + rawString.length + 800);
     const trailingTemplatesMatch = postRefSlice.match(/^((?:\s*\{\{\s*(?:webarchive|dead[ _]?link)[^{}]*\}\})+)/i);
     const trailingTemplates = trailingTemplatesMatch ? trailingTemplatesMatch[1] : "";
     const fullClusterString = `${rawString}${trailingTemplates}`;
 
-    // Find any bracketed [http... Title] or bare URLs inside the ref
-    const urlInRefRegex = /\[?(https?:\/\/[^\s\]"'>]+)(?:\s+([^\]]+))?\]?/gi;
+    // Find any bracketed [http... Title] or bare URLs inside the ref (excluding template syntax |, {, })
+    const urlInRefRegex = /\[?(https?:\/\/[^\s\]"'>|{}]+)(?:\s+([^\]]+))?\]?/gi;
     let refUrlMatch: RegExpExecArray | null;
 
     while ((refUrlMatch = urlInRefRegex.exec(refContent)) !== null) {
@@ -314,7 +320,7 @@ export function extractLinksFromWikitext(wikitext: string): ParsedItem[] {
   const extMatch = extLinkSectionRegex.exec(wikitext);
   if (extMatch) {
     const sectionContent = extMatch[1];
-    const lineRegex = /^\s*\*\s*\[(https?:\/\/[^\s\]]+)\s*([^\]]*)\](.*)$/gm;
+    const lineRegex = /^\s*\*\s*\[(https?:\/\/[^\s\]|{}]+)\s*([^\]]*)\](.*)$/gm;
     let lineMatch: RegExpExecArray | null;
 
     while ((lineMatch = lineRegex.exec(sectionContent)) !== null) {

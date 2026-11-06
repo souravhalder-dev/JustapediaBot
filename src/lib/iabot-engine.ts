@@ -62,7 +62,8 @@ function isMalformedArchiveDate(dateStr?: string): boolean {
  */
 export async function processArticleWithIABot(
   title: string,
-  options: IABotRunOptions = {}
+  options: IABotRunOptions = {},
+  customWikitext?: string
 ): Promise<IABotProcessResult> {
   const {
     archiveWorkingLinks = false,
@@ -83,20 +84,22 @@ export async function processArticleWithIABot(
 
   const details: string[] = [];
 
-  const page = await fetchJustapediaPage(title);
-  if (!page.exists || !page.wikitext.trim()) {
-    return {
-      title,
-      modified: false,
-      originalWikitext: "",
-      fixedWikitext: "",
-      summary: "",
-      stats,
-      details: [`Page "${title}" does not exist or has empty wikitext on Justapedia.`],
-    };
+  let originalWikitext = customWikitext || "";
+  if (!customWikitext) {
+    const page = await fetchJustapediaPage(title);
+    if (!page.exists || !page.wikitext.trim()) {
+      return {
+        title,
+        modified: false,
+        originalWikitext: "",
+        fixedWikitext: "",
+        summary: "",
+        stats,
+        details: [`Page "${title}" does not exist or has empty wikitext on Justapedia.`],
+      };
+    }
+    originalWikitext = page.wikitext;
   }
-
-  const originalWikitext = page.wikitext;
   let currentWikitext = originalWikitext;
 
   // 1. Extract all citation templates, references, and external links
@@ -175,6 +178,27 @@ export async function processArticleWithIABot(
               };
             }
           }
+        } else if (item.citationTemplate.urlStatus === "dead" && item.url) {
+          // Existing archive is valid, but url-status is "dead".
+          // Verify if the original URL is actually working and accessible!
+          const origHealth = await checkUrlHealth(item.url);
+          if (origHealth.status === "alive") {
+            const patched = patchCitationTemplate(
+              item.citationTemplate,
+              existingArchive,
+              existingArchiveDate || "",
+              "live"
+            );
+            if (patched !== item.citationTemplate.rawString) {
+              return {
+                target: item.citationTemplate.rawString,
+                replacement: patched,
+                statType: "repaired",
+                detail: `Corrected url-status from "dead" to "live" in {{${item.citationTemplate.templateName}}} on "${item.url}" (source is online and accessible)`,
+                removeDeadTag: true,
+              };
+            }
+          }
         }
         return null;
       }
@@ -223,19 +247,89 @@ export async function processArticleWithIABot(
       }
 
       // ------------------------------------------------------------------------
-      // CASE B: Determine URL health (Fast path: if already tagged {{dead link}}, skip HTTP ping)
+      // CASE B: Determine URL health
+      // STRICT RULE: Only mark as dead if CONFIRMED permanently dead (HTTP 404/410
+      // on multiple attempts, or DNS failure). Never mark alive links as dead.
+      // Timeouts, connection errors, SSL errors = TEMPORARY = treat as alive.
       // ------------------------------------------------------------------------
-      let isDead = item.hasDeadTag;
+      let isDead = false;
       let isAlive = false;
+      let confirmedDeadCode: number | undefined;
 
-      if (!isDead) {
-        const health = await checkUrlHealth(item.url);
-        isDead = health.isPermanentDead;
-        isAlive = health.status === "alive";
+      // Always perform HTTP health check — even if tagged {{dead link}}
+      const health = await checkUrlHealth(item.url);
+
+      if (health.status === "alive") {
+        isAlive = true;
+        isDead = false;
+      } else if (health.isPermanentDead) {
+        isDead = true;
+        isAlive = false;
+        confirmedDeadCode = health.httpCode;
+      } else {
+        // Temporary / inconclusive error (timeout, 5xx, connection reset)
+        // InternetArchiveBot policy: DO NOT mark as dead! Treat as alive / skip.
+        isDead = false;
+        isAlive = false;
       }
 
       // ------------------------------------------------------------------------
-      // CASE C: URL is DEAD (tagged dead, 404, 410, DNS fail, or soft 404)
+      // CASE B.2: Link is active, but was tagged with {{dead link}}
+      // Remove false dead link tag from active sources!
+      // ------------------------------------------------------------------------
+      if (isAlive && item.hasDeadTag) {
+        if (item.citationTemplate) {
+          let patched = item.citationTemplate.rawString;
+          if (item.citationTemplate.urlStatus === "dead" && item.citationTemplate.archiveUrl) {
+            patched = patchCitationTemplate(
+              item.citationTemplate,
+              item.citationTemplate.archiveUrl,
+              item.citationTemplate.archiveDate || "",
+              "live"
+            );
+          }
+          return {
+            target: item.citationTemplate.rawString,
+            replacement: patched,
+            statType: "repaired",
+            detail: `Removed false dead link tag from active source in {{${item.citationTemplate.templateName}}} on "${item.url}"`,
+            removeDeadTag: true,
+          };
+        } else if (item.linkType === "reference") {
+          const refOpenMatch = item.rawString.match(/^<ref(?:\s+[^>]*)?>/i);
+          const refCloseIdx = item.rawString.indexOf("</ref>");
+          if (refOpenMatch && refCloseIdx !== -1) {
+            const refOpen = refOpenMatch[0];
+            let inner = item.rawString.substring(refOpen.length, refCloseIdx);
+            inner = inner.replace(/\s*\{\{\s*dead[ _]?link\s*(?:\|[^{}]*)?\}\}/gi, "").trim();
+            const patched = `${refOpen}${inner}</ref>`;
+            if (patched !== item.rawString) {
+              return {
+                target: item.rawString,
+                replacement: patched,
+                statType: "repaired",
+                detail: `Removed false dead link tag from active reference on "${item.url}"`,
+                removeDeadTag: true,
+              };
+            }
+          }
+        } else if (item.linkType === "external") {
+          let cleanRaw = item.rawString.replace(/\s*\{\{\s*dead[ _]?link\s*(?:\|[^{}]*)?\}\}/gi, "").trim();
+          if (cleanRaw !== item.rawString) {
+            return {
+              target: item.rawString,
+              replacement: cleanRaw,
+              statType: "repaired",
+              detail: `Removed false dead link tag from active external link on "${item.url}"`,
+              removeDeadTag: true,
+            };
+          }
+        }
+      }
+
+      // ------------------------------------------------------------------------
+      // CASE C: URL is CONFIRMED DEAD (404/410 on multiple checks, or DNS fail)
+      // Only reaches here if link was verified dead with high confidence.
       // ------------------------------------------------------------------------
       if (isDead) {
         // Search Wayback Machine CDX API for best snapshot (matching citation date if present)
@@ -260,7 +354,7 @@ export async function processArticleWithIABot(
                 target: item.citationTemplate.rawString,
                 replacement: patched,
                 statType: "added",
-                detail: `Rescued dead link in {{${item.citationTemplate.templateName}}} on "${item.url}" with Wayback snapshot (${archiveDate})`,
+                detail: `Rescued confirmed dead link (HTTP ${confirmedDeadCode || "404/410"}) in {{${item.citationTemplate.templateName}}} on "${item.url}" with Wayback snapshot (${archiveDate})`,
                 removeDeadTag: true,
               };
             }
@@ -288,7 +382,7 @@ export async function processArticleWithIABot(
                   target: item.rawString,
                   replacement: patched,
                   statType: "added",
-                  detail: `Rescued dead link with {{webarchive}} on "${item.url}" (${archiveDate}) inside <ref>`,
+                  detail: `Rescued confirmed dead link with {{webarchive}} on "${item.url}" (${archiveDate}) inside <ref>`,
                   removeDeadTag: true,
                 };
               }
@@ -305,7 +399,7 @@ export async function processArticleWithIABot(
                 target: item.rawString,
                 replacement: patched,
                 statType: "added",
-                detail: `Rescued external link with {{webarchive}} on "${item.url}" (${archiveDate})`,
+                detail: `Rescued confirmed dead external link with {{webarchive}} on "${item.url}" (${archiveDate})`,
                 removeDeadTag: true,
               };
             }
@@ -313,13 +407,14 @@ export async function processArticleWithIABot(
           }
         } else if (tagUnrecoverableDead && !item.hasDeadTag && !item.hasArchive) {
           // No archive snapshot exists anywhere on Wayback: Tag as unrecoverable dead link
+          // But ONLY if we are 100% sure the link is permanently dead
           const tagged = tagDeadLink(item.rawString);
           if (tagged !== item.rawString) {
             return {
               target: item.rawString,
               replacement: tagged,
               statType: "tagged",
-              detail: `Tagged unrecoverable dead link on "${item.url}" with {{dead link}}`,
+              detail: `Tagged confirmed unrecoverable dead link (HTTP ${confirmedDeadCode || "404/410"}) on "${item.url}" with {{dead link}}`,
             };
           }
         }

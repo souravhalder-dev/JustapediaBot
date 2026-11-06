@@ -53,23 +53,97 @@ function isSoft404Redirect(initialUrl: string, finalUrl?: string): boolean {
 }
 
 /**
- * Advanced Link Health Checker matching Wikipedia InternetArchiveBot
- * Features:
- * - Temporary vs Permanent error distinction
- * - Soft-404 redirect detection
- * - Exponential backoff retry for transient 5xx/429
- * - Fast in-memory session caching
+ * Inspect error to check if it is DNS failure, timeout, or network glitch.
+ */
+function inspectError(err: any): { isDns: boolean; isTimeout: boolean; message: string } {
+  const msg = (err?.message || String(err)).toLowerCase();
+  const causeCode = (err?.cause?.code || "").toLowerCase();
+  const causeMsg = (err?.cause?.message || "").toLowerCase();
+  const name = (err?.name || "").toLowerCase();
+  const causeName = (err?.cause?.name || "").toLowerCase();
+
+  const isDns =
+    causeCode === "enotfound" ||
+    causeMsg.includes("enotfound") ||
+    causeMsg.includes("getaddrinfo") ||
+    msg.includes("enotfound") ||
+    msg.includes("getaddrinfo");
+
+  const isTimeout =
+    name === "aborterror" ||
+    causeName === "aborterror" ||
+    msg.includes("abort") ||
+    msg.includes("timeout") ||
+    causeMsg.includes("timeout") ||
+    causeCode === "etimedout";
+
+  return { isDns, isTimeout, message: msg };
+}
+
+/**
+ * Performs a single HTTP request with its own dedicated AbortController and timeout.
+ */
+async function fetchWithTimeout(
+  url: string,
+  method: "HEAD" | "GET",
+  timeoutMs: number
+): Promise<{ status?: number; finalUrl?: string; error?: any }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const headers: Record<string, string> = {
+      "User-Agent": USER_AGENT,
+      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Accept-Language": "en-US,en;q=0.9",
+    };
+    if (method === "GET") {
+      headers["Range"] = "bytes=0-4096";
+    }
+
+    const res = await fetch(url, {
+      method,
+      headers,
+      signal: controller.signal,
+      redirect: "follow",
+    });
+
+    clearTimeout(timer);
+    return { status: res.status, finalUrl: res.url };
+  } catch (err: any) {
+    clearTimeout(timer);
+    return { error: err };
+  }
+}
+
+/**
+ * Advanced Link Health Checker following official InternetArchiveBot guidelines.
+ *
+ * InternetArchiveBot rules:
+ * 1. A link is ALIVE if it returns HTTP 2xx or 3xx (unless soft-404).
+ * 2. Paywalls and access restrictions (HTTP 401, 403, 451) are ALIVE.
+ * 3. A link is ONLY PERMANENTLY DEAD if:
+ *    - It returns HTTP 404 Not Found or 410 Gone on both HEAD and GET, and verified on retry.
+ *    - Domain DNS resolution fails (ENOTFOUND / NXDOMAIN) on multiple attempts.
+ *    - Confirmed soft-404 redirect.
+ * 4. Timeouts, 5xx server errors, rate limits (429), and connection resets are TRANSIENT.
+ *    They MUST NEVER be tagged as dead links.
  */
 export async function checkUrlHealth(
   url: string,
-  timeoutMs: number = 1000,
-  maxRetries: number = 0
+  timeoutMs: number = 10000,
+  maxRetries: number = 1
 ): Promise<LinkCheckOutcome> {
   const cached = urlCheckCache.get(url);
   if (cached) return cached;
 
-  // Archive URLs are already archives, return alive immediately
-  if (url.includes("web.archive.org") || url.includes("archive.today") || url.includes("archive.is") || url.includes("webcitation.org")) {
+  // Archive URLs are archives, return alive immediately
+  if (
+    url.includes("web.archive.org") ||
+    url.includes("archive.today") ||
+    url.includes("archive.is") ||
+    url.includes("webcitation.org")
+  ) {
     const outcome: LinkCheckOutcome = {
       url,
       status: "alive",
@@ -83,61 +157,88 @@ export async function checkUrlHealth(
   }
 
   const startTime = Date.now();
-  let attempt = 0;
-  let lastError = "";
-  let lastStatus: LinkStatus = "unknown";
   let lastCode: number | undefined;
   let finalUrl: string | undefined;
+  let lastError: string | undefined;
 
-  while (attempt <= maxRetries) {
-    attempt++;
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (attempt > 0) {
+      // Pause briefly before retry
+      await new Promise((r) => setTimeout(r, 1000 * attempt));
+    }
 
-      let res: Response;
-      try {
-        // Attempt HEAD request first for speed
-        res = await fetch(url, {
-          method: "HEAD",
-          headers: {
-            "User-Agent": USER_AGENT,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-          },
-          signal: controller.signal,
-          redirect: "follow",
-        });
-      } catch (headErr: any) {
-        // If HEAD was rejected or aborted, attempt GET with Range header
-        res = await fetch(url, {
-          method: "GET",
-          headers: {
-            "User-Agent": USER_AGENT,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Range": "bytes=0-2048", // Only fetch first 2KB
-          },
-          signal: controller.signal,
-          redirect: "follow",
-        });
-      } finally {
-        clearTimeout(timer);
+    const currentTimeout = timeoutMs + attempt * 5000;
+
+    // 1. Try HEAD request first
+    let head = await fetchWithTimeout(url, "HEAD", currentTimeout);
+    let code = head.status;
+    finalUrl = head.finalUrl;
+
+    // 2. If HEAD succeeded with 2xx / 3xx
+    if (code && code >= 200 && code < 400) {
+      if (isSoft404Redirect(url, finalUrl)) {
+        // Soft 404 redirect confirmed
+        const outcome: LinkCheckOutcome = {
+          url,
+          status: "dead",
+          httpCode: code,
+          finalUrl,
+          latencyMs: Date.now() - startTime,
+          isPermanentDead: true,
+          isTemporaryError: false,
+          isSoft404: true,
+          error: "Redirected to root or login/error page (Soft 404)",
+        };
+        urlCheckCache.set(url, outcome);
+        return outcome;
       }
 
-      const latencyMs = Date.now() - startTime;
-      const code = res.status;
-      lastCode = code;
-      finalUrl = res.url;
+      const outcome: LinkCheckOutcome = {
+        url,
+        status: "alive",
+        httpCode: code,
+        finalUrl,
+        latencyMs: Date.now() - startTime,
+        isPermanentDead: false,
+        isTemporaryError: false,
+      };
+      urlCheckCache.set(url, outcome);
+      return outcome;
+    }
 
-      // 1. Success 2xx / 3xx
-      if (code >= 200 && code < 400) {
-        // Check for soft-404 redirects
+    // 3. If HEAD returned 401, 403, 451: Page is alive (paywalled or bot-protected)
+    if (code === 401 || code === 403 || code === 451) {
+      const outcome: LinkCheckOutcome = {
+        url,
+        status: "alive",
+        httpCode: code,
+        finalUrl,
+        latencyMs: Date.now() - startTime,
+        isPermanentDead: false,
+        isTemporaryError: false,
+      };
+      urlCheckCache.set(url, outcome);
+      return outcome;
+    }
+
+    // 4. In ALL OTHER CASES (HEAD returned 404, 405, 500, error, or timed out):
+    // Many servers block or misbehave on HEAD requests. ALWAYS fallback to GET!
+    const getResult = await fetchWithTimeout(url, "GET", currentTimeout + 2000);
+    const getCode = getResult.status;
+    if (getResult.finalUrl) finalUrl = getResult.finalUrl;
+
+    if (getCode) {
+      lastCode = getCode;
+
+      // GET succeeded with 2xx / 3xx -> ALIVE
+      if (getCode >= 200 && getCode < 400) {
         if (isSoft404Redirect(url, finalUrl)) {
           const outcome: LinkCheckOutcome = {
             url,
             status: "dead",
-            httpCode: code,
+            httpCode: getCode,
             finalUrl,
-            latencyMs,
+            latencyMs: Date.now() - startTime,
             isPermanentDead: true,
             isTemporaryError: false,
             isSoft404: true,
@@ -150,9 +251,9 @@ export async function checkUrlHealth(
         const outcome: LinkCheckOutcome = {
           url,
           status: "alive",
-          httpCode: code,
+          httpCode: getCode,
           finalUrl,
-          latencyMs,
+          latencyMs: Date.now() - startTime,
           isPermanentDead: false,
           isTemporaryError: false,
         };
@@ -160,51 +261,14 @@ export async function checkUrlHealth(
         return outcome;
       }
 
-      // 2. Permanently dead: 404 Not Found, 410 Gone
-      if (code === 404 || code === 410) {
-        const outcome: LinkCheckOutcome = {
-          url,
-          status: "dead",
-          httpCode: code,
-          finalUrl,
-          latencyMs,
-          isPermanentDead: true,
-          isTemporaryError: false,
-        };
-        urlCheckCache.set(url, outcome);
-        return outcome;
-      }
-
-      // 3. Transient / Rate Limited: 429, 500, 502, 503, 504
-      if (code === 429 || (code >= 500 && code <= 504)) {
-        if (attempt <= maxRetries) {
-          // Brief pause before retry
-          await new Promise((r) => setTimeout(r, 800));
-          continue;
-        }
-
-        const outcome: LinkCheckOutcome = {
-          url,
-          status: "error",
-          httpCode: code,
-          finalUrl,
-          latencyMs,
-          isPermanentDead: false,
-          isTemporaryError: true,
-          error: `Temporary HTTP ${code} server error`,
-        };
-        urlCheckCache.set(url, outcome);
-        return outcome;
-      }
-
-      // 4. Other 4xx client restrictions: 401 Unauthorized, 403 Forbidden (URL is alive, paywalled or protected)
-      if (code === 401 || code === 403 || code === 451) {
+      // GET returned 401, 403, 451 -> ALIVE
+      if (getCode === 401 || getCode === 403 || getCode === 451) {
         const outcome: LinkCheckOutcome = {
           url,
           status: "alive",
-          httpCode: code,
+          httpCode: getCode,
           finalUrl,
-          latencyMs,
+          latencyMs: Date.now() - startTime,
           isPermanentDead: false,
           isTemporaryError: false,
         };
@@ -212,56 +276,85 @@ export async function checkUrlHealth(
         return outcome;
       }
 
-      // Default other codes
-      lastStatus = "error";
-    } catch (err: any) {
-      lastError = err.message || String(err);
-      const isDnsError = lastError.includes("ENOTFOUND") || lastError.includes("getaddrinfo");
-      const isRefused = lastError.includes("ECONNREFUSED");
-      const isTimeout = lastError.includes("aborted") || lastError.includes("ETIMEDOUT");
+      // GET returned 404 or 410 -> candidate permanently dead
+      if (getCode === 404 || getCode === 410) {
+        if (attempt < maxRetries) {
+          continue; // Verify on next attempt
+        }
+        const outcome: LinkCheckOutcome = {
+          url,
+          status: "dead",
+          httpCode: getCode,
+          finalUrl,
+          latencyMs: Date.now() - startTime,
+          isPermanentDead: true,
+          isTemporaryError: false,
+          error: `HTTP ${getCode} confirmed on multiple checks`,
+        };
+        urlCheckCache.set(url, outcome);
+        return outcome;
+      }
 
-      if (isDnsError || isRefused) {
-        // Domain does not exist or connection refused: Permanently dead
+      // GET returned 429 or 5xx -> transient server error
+      if (getCode === 429 || (getCode >= 500 && getCode <= 504)) {
+        if (attempt < maxRetries) continue;
+        const outcome: LinkCheckOutcome = {
+          url,
+          status: "error",
+          httpCode: getCode,
+          finalUrl,
+          latencyMs: Date.now() - startTime,
+          isPermanentDead: false,
+          isTemporaryError: true,
+          error: `Temporary HTTP ${getCode} server error`,
+        };
+        urlCheckCache.set(url, outcome);
+        return outcome;
+      }
+    } else if (getResult.error) {
+      // GET threw an error
+      const errInfo = inspectError(getResult.error);
+      lastError = errInfo.message;
+
+      // DNS error (ENOTFOUND) -> domain does not exist
+      if (errInfo.isDns) {
+        if (attempt < maxRetries) continue;
         const outcome: LinkCheckOutcome = {
           url,
           status: "dead",
           latencyMs: Date.now() - startTime,
           isPermanentDead: true,
           isTemporaryError: false,
-          error: isDnsError ? "DNS resolution failed (Domain does not exist)" : "Connection refused by host",
+          error: "DNS resolution failed (Domain does not exist)",
         };
         urlCheckCache.set(url, outcome);
         return outcome;
       }
 
-      if (isTimeout && attempt <= maxRetries) {
-        await new Promise((r) => setTimeout(r, 600));
-        continue;
-      }
-
-      const outcome: LinkCheckOutcome = {
-        url,
-        status: isTimeout ? "error" : "dead",
-        latencyMs: Date.now() - startTime,
-        isPermanentDead: !isTimeout,
-        isTemporaryError: isTimeout,
-        error: lastError,
-      };
-      urlCheckCache.set(url, outcome);
-      return outcome;
+      // Timeouts and network errors -> transient, retry
+      if (attempt < maxRetries) continue;
     }
   }
 
+  // If we reach here, the check was inconclusive (e.g. timeout, 5xx, or connection error)
+  // CRITICAL RULE: NEVER mark inconclusive errors as permanently dead!
   const finalOutcome: LinkCheckOutcome = {
     url,
-    status: lastStatus,
+    status: "error",
     httpCode: lastCode,
     finalUrl,
     latencyMs: Date.now() - startTime,
     isPermanentDead: false,
     isTemporaryError: true,
-    error: lastError || `HTTP status ${lastCode || "unknown"} error`,
+    error: lastError || `Inconclusive after checks (HTTP ${lastCode || "unknown"})`,
   };
   urlCheckCache.set(url, finalOutcome);
   return finalOutcome;
+}
+
+/**
+ * Clear the URL check cache (useful between cycles)
+ */
+export function clearUrlCheckCache(): void {
+  urlCheckCache.clear();
 }
