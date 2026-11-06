@@ -117,6 +117,7 @@ class ServerBotRunner {
   private isLoopRunning: boolean = false;
   private isReplenishing: boolean = false;
   private continueTokens: Map<string, string> = new Map();
+  private sessionProcessedTitles: Set<string> = new Set();
 
   constructor() {
     this.state = this.loadState();
@@ -307,9 +308,13 @@ class ServerBotRunner {
 
       let added = 0;
       for (const m of members) {
-        if (!this.state.queue.includes(m)) {
-          this.state.queue.push(m);
-          added++;
+        const normM = m.trim().toLowerCase();
+        if (!this.state.queue.includes(m) && !this.sessionProcessedTitles.has(normM)) {
+          const eligibility = isArticleEligibleForCheck(m);
+          if (eligibility.eligible) {
+            this.state.queue.push(m);
+            added++;
+          }
         }
       }
 
@@ -431,6 +436,8 @@ class ServerBotRunner {
     if (!page || !page.exists || !page.wikitext.trim()) {
       return false;
     }
+
+    this.sessionProcessedTitles.add(articleTitle.trim().toLowerCase());
 
     const currentRevid = page.revisionId || 0;
     const eligibility = isArticleEligibleForCheck(articleTitle, currentRevid, page.wikitext);

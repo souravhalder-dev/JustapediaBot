@@ -180,6 +180,49 @@ export async function processArticleWithIABot(
       }
 
       // ------------------------------------------------------------------------
+      // CASE A.2: Bare reference or external link ALREADY HAS an archive link
+      // ------------------------------------------------------------------------
+      if (item.hasArchive && (item.linkType === "reference" || item.linkType === "external")) {
+        if (item.linkType === "reference") {
+          const refOpenMatch = item.rawString.match(/^<ref(?:\s+[^>]*)?>/i);
+          const refCloseIdx = item.rawString.indexOf("</ref>");
+          if (refOpenMatch && refCloseIdx !== -1) {
+            const refOpen = refOpenMatch[0];
+            let inner = item.rawString.substring(refOpen.length, refCloseIdx);
+            const trailing = item.rawString.substring(refCloseIdx + 6);
+
+            // Find best existing webarchive from trailing or inner
+            const waMatch =
+              trailing.match(/\{\{\s*webarchive\s*\|[^{}]*\}\}/i) ||
+              inner.match(/\{\{\s*webarchive\s*\|[^{}]*\}\}/i);
+            const waTag = waMatch ? waMatch[0].trim() : "";
+
+            // Strip any obsolete {{dead link}} templates
+            inner = inner.replace(/\s*\{\{\s*dead[ _]?link\s*(?:\|[^{}]*)?\}\}/gi, "").trim();
+
+            // Clean any inner webarchive to prevent duplicates
+            inner = inner.replace(/\s*\{\{\s*webarchive\s*\|[^{}]*\}\}/gi, "").trim();
+
+            if (waTag) {
+              inner = `${inner} ${waTag}`;
+            }
+
+            const patched = `${refOpen}${inner}</ref>`;
+            if (patched !== item.rawString) {
+              return {
+                target: item.rawString,
+                replacement: patched,
+                statType: "repaired",
+                detail: `Cleaned up reference on "${item.url}": removed obsolete {{dead link}} and consolidated archive inside <ref>`,
+                removeDeadTag: true,
+              };
+            }
+          }
+        }
+        return null;
+      }
+
+      // ------------------------------------------------------------------------
       // CASE B: Determine URL health (Fast path: if already tagged {{dead link}}, skip HTTP ping)
       // ------------------------------------------------------------------------
       let isDead = item.hasDeadTag;
@@ -221,19 +264,52 @@ export async function processArticleWithIABot(
                 removeDeadTag: true,
               };
             }
-          } else if (item.linkType === "reference" || item.linkType === "external") {
-            // 2. Patch Bare Reference or External Link with {{webarchive}}
+          } else if (item.linkType === "reference") {
+            // 2. Patch Bare Reference: {{webarchive}} MUST be placed INSIDE <ref>, before </ref>
+            const refOpenMatch = item.rawString.match(/^<ref(?:\s+[^>]*)?>/i);
+            const refCloseIdx = item.rawString.indexOf("</ref>");
+
+            if (refOpenMatch && refCloseIdx !== -1) {
+              const refOpen = refOpenMatch[0];
+              let inner = item.rawString.substring(refOpen.length, refCloseIdx);
+
+              // Strip any dead link tags from inner
+              inner = inner.replace(/\s*\{\{\s*dead[ _]?link\s*(?:\|[^{}]*)?\}\}/gi, "").trim();
+
+              // Clean any inner webarchive to prevent duplicates
+              inner = inner.replace(/\s*\{\{\s*webarchive\s*\|[^{}]*\}\}/gi, "").trim();
+
+              // Add {{webarchive}} inside <ref>, before </ref>
+              const webArchiveTag = `{{webarchive |url=${snapshot.url} |date=${archiveDate}}}`;
+              const patched = `${refOpen}${inner} ${webArchiveTag}</ref>`;
+
+              if (patched !== item.rawString) {
+                return {
+                  target: item.rawString,
+                  replacement: patched,
+                  statType: "added",
+                  detail: `Rescued dead link with {{webarchive}} on "${item.url}" (${archiveDate}) inside <ref>`,
+                  removeDeadTag: true,
+                };
+              }
+            }
+            return null;
+          } else if (item.linkType === "external") {
+            // 3. Patch External Link: Add {{webarchive}} after link
+            let cleanRaw = item.rawString.replace(/\s*\{\{\s*dead[ _]?link\s*(?:\|[^{}]*)?\}\}/gi, "").trim();
             const webArchiveTag = ` {{webarchive |url=${snapshot.url} |date=${archiveDate}}}`;
-            if (!item.rawString.includes("{{webarchive") && !item.rawString.includes("archive.org")) {
-              const patched = `${item.rawString}${webArchiveTag}`;
+            const patched = `${cleanRaw}${webArchiveTag}`;
+
+            if (patched !== item.rawString) {
               return {
                 target: item.rawString,
                 replacement: patched,
                 statType: "added",
-                detail: `Rescued dead link with {{webarchive}} on "${item.url}" (${archiveDate})`,
+                detail: `Rescued external link with {{webarchive}} on "${item.url}" (${archiveDate})`,
                 removeDeadTag: true,
               };
             }
+            return null;
           }
         } else if (tagUnrecoverableDead && !item.hasDeadTag) {
           // No archive snapshot exists anywhere on Wayback: Tag as unrecoverable dead link
@@ -306,6 +382,13 @@ export async function processArticleWithIABot(
     }
   }
 
+  // Deduplicate and consolidate any trailing or misplaced archive templates in the entire wikitext
+  const cleanedDuplicates = cleanupWikitextDuplicateArchives(currentWikitext);
+  if (cleanedDuplicates !== currentWikitext) {
+    currentWikitext = cleanedDuplicates;
+    details.push("Cleaned up duplicate archive templates and consolidated references inside <ref>");
+  }
+
   // --------------------------------------------------------------------------
   // Summary & Modification Verification
   // --------------------------------------------------------------------------
@@ -342,4 +425,32 @@ export async function processArticleWithIABot(
     stats,
     details: details.length > 0 ? details : [`All ${stats.referencesChecked} reference(s) checked on "${title}" are healthy.`],
   };
+}
+
+/**
+ * Deduplicate and clean misplaced {{webarchive}} templates in wikitext:
+ * 1. Move any {{webarchive}} sitting outside </ref> back inside <ref>
+ * 2. Strip obsolete {{dead link}} templates inside references that have archives
+ * 3. Remove consecutive duplicate {{webarchive}} templates
+ */
+export function cleanupWikitextDuplicateArchives(wikitext: string): string {
+  let cleaned = wikitext;
+
+  // 1. Fix any <ref> followed by misplaced {{webarchive}} templates outside </ref>
+  const refOutsideWaRegex = /(<ref(?:\s+[^>]*)?>)([\s\S]*?)(<\/ref>)(\s*\{\{\s*webarchive\s*\|[^{}]*\}\})+/gi;
+  cleaned = cleaned.replace(refOutsideWaRegex, (_match, refOpen, inner, refClose, trailingWa) => {
+    let cleanInner = inner.replace(/\s*\{\{\s*dead[ _]?link\s*(?:\|[^{}]*)?\}\}/gi, "").trim();
+    const firstWaMatch = trailingWa.match(/\{\{\s*webarchive\s*\|[^{}]*\}\}/i);
+    const waTag = firstWaMatch ? firstWaMatch[0].trim() : "";
+    if (!cleanInner.toLowerCase().includes("{{webarchive") && waTag) {
+      cleanInner = `${cleanInner} ${waTag}`;
+    }
+    return `${refOpen}${cleanInner}${refClose}`;
+  });
+
+  // 2. Remove consecutive duplicate {{webarchive}} templates
+  const duplicateWaRegex = /(\{\{\s*webarchive\s*\|[^{}]*\}\})(\s*\{\{\s*webarchive\s*\|[^{}]*\}\})+/gi;
+  cleaned = cleaned.replace(duplicateWaRegex, "$1");
+
+  return cleaned;
 }

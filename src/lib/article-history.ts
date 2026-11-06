@@ -179,10 +179,29 @@ export function isArticleEligibleForCheck(
   const norm = normalizeTitle(title);
   const entry = historyMap.get(norm);
 
-  // If wikitext is available, inspect whether citations still need archive links or repairs:
+  // 1. Strict Duplicate Edit Shield:
+  // If article was already checked or edited by the bot at this revision and hasn't been modified since
+  if (entry && currentRevid && entry.lastCheckedRevid > 0 && currentRevid <= entry.lastCheckedRevid) {
+    return {
+      eligible: false,
+      reason: `Article was already processed by ${entry.resolvedByBot} at revision #${entry.lastCheckedRevid} (${entry.status}). No new edits since last check.`,
+      previousEntry: entry,
+    };
+  }
+
+  // 2. If wikitext is available, inspect whether citations still need archive links or repairs:
   if (wikitext) {
     const needsWork = articleNeedsArchival(wikitext);
     if (needsWork) {
+      // If the bot just edited and resolved this article, do NOT re-edit in a loop
+      if (entry && entry.status === "edited_and_resolved" && currentRevid && currentRevid <= entry.lastCheckedRevid) {
+        return {
+          eligible: false,
+          reason: `Article was already edited and resolved at revision #${entry.lastCheckedRevid}. Skipping to prevent duplicate edit loop.`,
+          previousEntry: entry,
+        };
+      }
+
       return {
         eligible: true,
         reason: entry
@@ -206,7 +225,7 @@ export function isArticleEligibleForCheck(
     return { eligible: true }; // First time checking this article
   }
 
-  // If currentRevid is provided and greater than lastCheckedRevid
+  // 3. If currentRevid is provided and greater than lastCheckedRevid
   if (currentRevid && entry.lastCheckedRevid > 0) {
     if (currentRevid > entry.lastCheckedRevid) {
       return {

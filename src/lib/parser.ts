@@ -252,6 +252,12 @@ export function extractLinksFromWikitext(wikitext: string): ParsedItem[] {
     const rawString = match[0];
     const refContent = match[1];
 
+    // Check for any misplaced trailing {{webarchive}} or {{dead link}} templates immediately following </ref>
+    const postRefSlice = wikitext.substring(match.index + rawString.length, match.index + rawString.length + 800);
+    const trailingTemplatesMatch = postRefSlice.match(/^((?:\s*\{\{\s*(?:webarchive|dead[ _]?link)[^{}]*\}\})+)/i);
+    const trailingTemplates = trailingTemplatesMatch ? trailingTemplatesMatch[1] : "";
+    const fullClusterString = `${rawString}${trailingTemplates}`;
+
     // Find any bracketed [http... Title] or bare URLs inside the ref
     const urlInRefRegex = /\[?(https?:\/\/[^\s\]"'>]+)(?:\s+([^\]]+))?\]?/gi;
     let refUrlMatch: RegExpExecArray | null;
@@ -265,22 +271,32 @@ export function extractLinksFromWikitext(wikitext: string): ParsedItem[] {
           url = parsedArch.originalUrl;
         }
 
-        const hasArchive = /\{\{\s*webarchive/i.test(refContent) || /web\.archive\.org/i.test(url);
-        const hasDeadTag = /\{\{\s*dead[ _]link/i.test(refContent);
+        const hasArchive =
+          /\{\{\s*webarchive/i.test(refContent) ||
+          /\{\{\s*webarchive/i.test(trailingTemplates) ||
+          /web\.archive\.org/i.test(url) ||
+          /archive\.today/i.test(url);
+        const hasDeadTag =
+          /\{\{\s*dead[ _]link/i.test(refContent) ||
+          /\{\{\s*dead[ _]link/i.test(trailingTemplates);
 
         items.push({
           id: `ref-${items.length + 1}`,
           url,
           domain: extractDomain(url),
           linkType: "reference",
-          rawString,
+          rawString: fullClusterString,
           hasArchive,
           hasDeadTag,
           startIndex: match.index,
-          endIndex: match.index + rawString.length,
+          endIndex: match.index + fullClusterString.length,
         });
         seenUrls.add(url);
       }
+    }
+
+    if (trailingTemplates) {
+      refRegex.lastIndex = match.index + fullClusterString.length;
     }
   }
 
@@ -412,15 +428,18 @@ export function patchCitationTemplate(
  * Remove obsolete {{dead link}} templates following a rescued citation
  */
 export function removeDeadLinkTag(wikitext: string, targetString: string): string {
-  // Check if {{dead link}} or {{deadlink}} is immediately attached or after targetString
-  const deadLinkRegex = /\s*\{\{\s*dead[ _]?link\s*(?:\|[^{}]*)?\}\}/i;
+  const deadLinkRegex = /\s*\{\{\s*dead[ _]?link\s*(?:\|[^{}]*)?\}\}/gi;
   const idx = wikitext.indexOf(targetString);
   if (idx === -1) return wikitext;
 
-  const afterTarget = wikitext.substring(idx + targetString.length, idx + targetString.length + 80);
-  const match = afterTarget.match(deadLinkRegex);
-  if (match) {
-    return wikitext.substring(0, idx + targetString.length) + afterTarget.replace(deadLinkRegex, "") + wikitext.substring(idx + targetString.length + 80);
+  // Search in a generous window (up to 350 chars after the target)
+  const windowEnd = Math.min(wikitext.length, idx + targetString.length + 350);
+  const afterTarget = wikitext.substring(idx + targetString.length, windowEnd);
+
+  if (deadLinkRegex.test(afterTarget)) {
+    deadLinkRegex.lastIndex = 0;
+    const cleanedAfter = afterTarget.replace(deadLinkRegex, "");
+    return wikitext.substring(0, idx + targetString.length) + cleanedAfter + wikitext.substring(windowEnd);
   }
 
   return wikitext;
