@@ -84,7 +84,7 @@ function createDefaultState(): BotRunnerState {
       archiveWorkingLinks: false,
       repairBrokenArchives: true,
       tagUnrecoverableDead: true,
-      maxLinksPerPage: 12,
+      maxLinksPerPage: 50,
       categoryInput: "Category:All articles with dead external links",
     },
     detailedStats: {
@@ -116,6 +116,7 @@ class ServerBotRunner {
   private stopRequested: boolean = false;
   private isLoopRunning: boolean = false;
   private isReplenishing: boolean = false;
+  private continueTokens: Map<string, string> = new Map();
 
   constructor() {
     this.state = this.loadState();
@@ -259,6 +260,7 @@ class ServerBotRunner {
 
   /**
    * Trigger queue replenishment from Justapedia category crawling or template transclusions
+   * Tracks cmcontinue and eicontinue pagination to iterate sequentially across the whole wiki
    */
   public async replenishQueue(limit: number = 50, customSource?: string): Promise<number> {
     if (this.isReplenishing) return 0;
@@ -270,20 +272,37 @@ class ServerBotRunner {
         this.state.options.categoryInput ||
         "Category:All articles with dead external links";
 
+      const currentToken = this.continueTokens.get(source);
       let members: string[] = [];
 
       if (source.toLowerCase().startsWith("template:")) {
-        const res = await fetchTemplateTransclusions(source, limit);
+        const res = await fetchTemplateTransclusions(source, limit, currentToken);
         members = res.members || [];
+        if (res.eicontinue) {
+          this.continueTokens.set(source, res.eicontinue);
+        } else {
+          this.continueTokens.delete(source);
+        }
       } else {
-        const res = await fetchCategoryMembers(source, limit);
+        const res = await fetchCategoryMembers(source, limit, currentToken);
         members = res.members || [];
+        if (res.cmcontinue) {
+          this.continueTokens.set(source, res.cmcontinue);
+        } else {
+          this.continueTokens.delete(source);
+        }
       }
 
-      // If category members was small, supplement with active Template:Dead link articles on Justapedia
-      if (members.length < 15 && !source.toLowerCase().startsWith("template:")) {
-        const tplRes = await fetchTemplateTransclusions("Template:Dead link", limit);
+      // If category members was small or end reached, supplement with active Template:Dead link articles on Justapedia
+      if (members.length < 20 && !source.toLowerCase().startsWith("template:")) {
+        const tplToken = this.continueTokens.get("Template:Dead link");
+        const tplRes = await fetchTemplateTransclusions("Template:Dead link", limit, tplToken);
         members = [...members, ...(tplRes.members || [])];
+        if (tplRes.eicontinue) {
+          this.continueTokens.set("Template:Dead link", tplRes.eicontinue);
+        } else {
+          this.continueTokens.delete("Template:Dead link");
+        }
       }
 
       let added = 0;
@@ -414,15 +433,15 @@ class ServerBotRunner {
     }
 
     const currentRevid = page.revisionId || 0;
-    const eligibility = isArticleEligibleForCheck(articleTitle, currentRevid);
+    const eligibility = isArticleEligibleForCheck(articleTitle, currentRevid, page.wikitext);
 
-    // 2. Duplicate Check Shield: if revid <= lastCheckedRevid, skip immediately
+    // 2. Duplicate Check Shield: If all citations have archive links and zero dead links remain, skip cleanly
     if (!eligibility.eligible) {
       this.state.totalSkipped += 1;
       this.addLog({
         level: "info",
         articleTitle,
-        message: `[DUPLICATE SHIELD] "${articleTitle}" (rev #${currentRevid}): ${eligibility.reason}`,
+        message: `[PROPERLY FIXED] "${articleTitle}" (rev #${currentRevid}): ${eligibility.reason}`,
       });
       return false;
     }
@@ -599,7 +618,7 @@ class ServerBotRunner {
     this.isLoopRunning = true;
     this.stopRequested = false;
 
-    const CONCURRENCY = 6;
+    const CONCURRENCY = 8;
     const activeWorkers = new Set<Promise<void>>();
     const inProgressArticles = new Set<string>();
 

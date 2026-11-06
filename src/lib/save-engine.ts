@@ -11,6 +11,17 @@ const DEFAULT_HEADERS = {
   "Accept-Language": "en-US,en;q=0.9",
 };
 
+interface SessionAuthCacheEntry {
+  actualUsername: string;
+  hasBotPermission: boolean;
+  hasCleanTalkBypass: boolean;
+  csrfToken: string;
+  timestamp: number;
+}
+
+const sessionAuthCache = new Map<string, SessionAuthCacheEntry>();
+const SESSION_CACHE_TTL = 10 * 60 * 1000; // 10 minutes cache TTL
+
 /**
  * Consistent Saving Mechanism matching the Birth Update Bot (justapedia_client.py)
  * 
@@ -62,61 +73,114 @@ export async function executeJustapediaEdit(
   const expectedUsername = verification.user.username;
 
   try {
-    // 2. Strictly verify the current authenticated identity with Justapedia Action API via bridge
-    const userinfoResp = await executeBridgeRequest<{
-      query?: {
-        userinfo?: {
-          name?: string;
-          anon?: boolean | string;
-          rights?: string[];
-          groups?: string[];
+    const now = Date.now();
+    let auth = sessionAuthCache.get(sessionToken);
+
+    if (!auth || now - auth.timestamp > SESSION_CACHE_TTL) {
+      // Fetch userinfo
+      const userinfoResp = await executeBridgeRequest<{
+        query?: {
+          userinfo?: {
+            name?: string;
+            anon?: boolean | string;
+            rights?: string[];
+            groups?: string[];
+          };
         };
-      };
-    }>({
-      method: "GET",
-      params: {
-        action: "query",
-        meta: "userinfo",
-        uiprop: "groups|rights",
-        format: "json",
-      },
-      cookies,
-    });
+      }>({
+        method: "GET",
+        params: {
+          action: "query",
+          meta: "userinfo",
+          uiprop: "groups|rights",
+          format: "json",
+        },
+        cookies,
+      });
 
-    if (userinfoResp.status !== 200 || !userinfoResp.data) {
-      return {
-        success: false,
-        title: title.trim(),
-        message: `Justapedia API returned HTTP ${userinfoResp.status} during user verification: ${userinfoResp.error || ""}`,
+      if (userinfoResp.status !== 200 || !userinfoResp.data) {
+        return {
+          success: false,
+          title: title.trim(),
+          message: `Justapedia API returned HTTP ${userinfoResp.status} during user verification: ${userinfoResp.error || ""}`,
+        };
+      }
+
+      const uinfo = userinfoResp.data?.query?.userinfo;
+      const actualUsername: string = uinfo?.name || "";
+      const isAnon = !uinfo || Boolean(uinfo.anon);
+
+      if (isAnon || !actualUsername) {
+        return {
+          success: false,
+          title: title.trim(),
+          message: "Authentication failed: Justapedia session cookies have expired. Please log in again.",
+          raw_response: uinfo,
+        };
+      }
+
+      const userRights: string[] = Array.isArray(uinfo?.rights) ? uinfo.rights : [];
+      const userGroups: string[] = Array.isArray(uinfo?.groups) ? uinfo.groups : [];
+      const hasBotPermission = userRights.includes("bot") || userGroups.includes("bot");
+      const hasCleanTalkBypass = userRights.includes("cleantalk-bypass");
+
+      if (expectedUsername && actualUsername.toLowerCase() !== expectedUsername.toLowerCase()) {
+        return {
+          success: false,
+          title: title.trim(),
+          message: `Authentication mismatch: MediaWiki authenticated as '${actualUsername}' instead of '${expectedUsername}'. Please log in again.`,
+          raw_response: uinfo,
+        };
+      }
+
+      // Fetch CSRF token
+      const tokenResp = await executeBridgeRequest<{
+        query?: {
+          tokens?: {
+            csrftoken?: string;
+          };
+        };
+      }>({
+        method: "GET",
+        params: {
+          action: "query",
+          meta: "tokens",
+          type: "csrf",
+          format: "json",
+        },
+        cookies,
+      });
+
+      if (tokenResp.status !== 200 || !tokenResp.data) {
+        return {
+          success: false,
+          title: title.trim(),
+          message: `Failed to connect to Justapedia to obtain CSRF token (HTTP ${tokenResp.status}): ${tokenResp.error || ""}`,
+        };
+      }
+
+      const csrfToken = tokenResp.data?.query?.tokens?.csrftoken;
+
+      if (!csrfToken || csrfToken === "+\\") {
+        return {
+          success: false,
+          title: title.trim(),
+          message: "Failed to retrieve valid CSRF token with session cookies. Please re-authenticate.",
+          raw_response: tokenResp.data,
+        };
+      }
+
+      auth = {
+        actualUsername,
+        hasBotPermission,
+        hasCleanTalkBypass,
+        csrfToken,
+        timestamp: now,
       };
+      sessionAuthCache.set(sessionToken, auth);
     }
 
-    const uinfo = userinfoResp.data?.query?.userinfo;
-    const actualUsername: string = uinfo?.name || "";
-    const isAnon = !uinfo || Boolean(uinfo.anon);
-
-    if (isAnon || !actualUsername) {
-      return {
-        success: false,
-        title: title.trim(),
-        message: "Authentication failed: Justapedia session cookies have expired. Please log in again.",
-        raw_response: uinfo,
-      };
-    }
-
-    const userRights: string[] = Array.isArray(uinfo?.rights) ? uinfo.rights : [];
-    const userGroups: string[] = Array.isArray(uinfo?.groups) ? uinfo.groups : [];
-    const hasBotPermission = userRights.includes("bot") || userGroups.includes("bot");
-    const hasCleanTalkBypass = userRights.includes("cleantalk-bypass");
-
-    if (expectedUsername && actualUsername.toLowerCase() !== expectedUsername.toLowerCase()) {
-      return {
-        success: false,
-        title: title.trim(),
-        message: `Authentication mismatch: MediaWiki authenticated as '${actualUsername}' instead of '${expectedUsername}'. Please log in again.`,
-        raw_response: uinfo,
-      };
-    }
+    const { actualUsername, hasBotPermission, hasCleanTalkBypass, csrfToken } = auth;
 
     // Determine target title and wikitext
     let targetTitle = title.trim();
@@ -124,63 +188,26 @@ export async function executeJustapediaEdit(
     let finalSummary = summary.trim();
 
     if (use_sandbox) {
-      // In Sandbox mode, prioritize user's personal sandbox (User:<username>/sandbox) to avoid Project namespace restrictions
       targetTitle = sandbox_title || `User:${actualUsername}/sandbox`;
       textToSave = `<!-- TEST DRAFT FOR [${title}] VIA JUSTAPEDIA BOT SUITE -->\n{{Please leave this line alone (sandbox heading)}}\n\n${wikitext}`;
       finalSummary = `[TEST] Draft for ${title}: ${summary}`;
     }
 
-    // 3. Retrieve authenticated user's CSRF token via bridge
-    const tokenResp = await executeBridgeRequest<{
-      query?: {
-        tokens?: {
-          csrftoken?: string;
-        };
-      };
-    }>({
-      method: "GET",
-      params: {
-        action: "query",
-        meta: "tokens",
-        type: "csrf",
-        format: "json",
-      },
-      cookies,
-    });
-
-    if (tokenResp.status !== 200 || !tokenResp.data) {
-      return {
-        success: false,
-        title: targetTitle,
-        message: `Failed to connect to Justapedia to obtain CSRF token (HTTP ${tokenResp.status}): ${tokenResp.error || ""}`,
-      };
-    }
-
-    const csrfToken = tokenResp.data?.query?.tokens?.csrftoken;
-
-    if (!csrfToken || csrfToken === "+\\") {
-      return {
-        success: false,
-        title: targetTitle,
-        message: "Failed to retrieve valid CSRF token with session cookies. Please re-authenticate.",
-        raw_response: tokenResp.data,
-      };
-    }
-
-    // 4. Submit edit under the logged-in user's account via Cloudflare-bypass bridge
+    // Submit edit under the logged-in user's account via Cloudflare-bypass bridge
     const sendEditPost = async (params: {
       titleToUse: string;
       textToUse: string;
       summaryToUse: string;
       withBotFlag: boolean;
       withMinorFlag: boolean;
+      tokenToUse: string;
     }) => {
       const editData: Record<string, string> = {
         action: "edit",
         title: params.titleToUse,
         text: params.textToUse,
         summary: params.summaryToUse,
-        token: csrfToken,
+        token: params.tokenToUse,
         format: "json",
         formatversion: "2",
         errorformat: "plaintext",
@@ -213,6 +240,7 @@ export async function executeJustapediaEdit(
       summaryToUse: finalSummary,
       withBotFlag: sentWithBot,
       withMinorFlag: Boolean(is_minor),
+      tokenToUse: csrfToken,
     });
 
     console.log(`[JUSTAPEDIA EDIT ATTEMPT] target: "${targetTitle}", editor: "${actualUsername}", botFlag: ${sentWithBot}`);
@@ -231,6 +259,7 @@ export async function executeJustapediaEdit(
         summaryToUse: finalSummary,
         withBotFlag: false,
         withMinorFlag: Boolean(is_minor),
+        tokenToUse: csrfToken,
       });
       errorsList = Array.isArray(data?.errors) ? data.errors : (data?.error ? [data.error] : []);
     }
@@ -247,6 +276,7 @@ export async function executeJustapediaEdit(
         summaryToUse: finalSummary,
         withBotFlag: sentWithBot,
         withMinorFlag: Boolean(is_minor),
+        tokenToUse: csrfToken,
       });
       errorsList = Array.isArray(data?.errors) ? data.errors : (data?.error ? [data.error] : []);
     }
@@ -260,6 +290,7 @@ export async function executeJustapediaEdit(
       console.error(`[JUSTAPEDIA EDIT ERROR] code: ${errorCode}, info: ${errorInfo}, target: ${targetTitle}`);
 
       if (["badtoken", "notoken", "permissiondenied", "assertuserfailed", "mustbeloggedin"].includes(errorCode)) {
+        sessionAuthCache.delete(sessionToken);
         return {
           success: false,
           title: targetTitle,

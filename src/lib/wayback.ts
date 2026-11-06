@@ -225,10 +225,16 @@ export function normalizeTimestamp(rawDateOrTimestamp: string): string {
   return "";
 }
 
+const waybackAvailabilityCache = new Map<string, WaybackSnapshot | null>();
+
 /**
  * Check Wayback availability using the fast /wayback/available endpoint
  */
 export async function checkWaybackAvailability(url: string, timestamp?: string): Promise<WaybackSnapshot | null> {
+  const cacheKey = `${url}__${timestamp || ""}`;
+  if (waybackAvailabilityCache.has(cacheKey)) {
+    return waybackAvailabilityCache.get(cacheKey) || null;
+  }
   try {
     const params = new URLSearchParams({ url });
     if (timestamp) {
@@ -243,21 +249,27 @@ export async function checkWaybackAvailability(url: string, timestamp?: string):
       cache: "no-store",
     });
 
-    if (!res.ok) return null;
+    if (!res.ok) {
+      waybackAvailabilityCache.set(cacheKey, null);
+      return null;
+    }
 
     const data = await res.json();
     const snapshot = data?.archived_snapshots?.closest;
 
     if (snapshot && snapshot.available) {
-      return {
+      const snapObj: WaybackSnapshot = {
         available: true,
         url: snapshot.url.replace(/^http:\/\//i, "https://"),
         timestamp: snapshot.timestamp,
         status: String(snapshot.status || "200"),
         originalUrl: url,
       };
+      waybackAvailabilityCache.set(cacheKey, snapObj);
+      return snapObj;
     }
 
+    waybackAvailabilityCache.set(cacheKey, null);
     return null;
   } catch (err) {
     return null;

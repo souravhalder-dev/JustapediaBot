@@ -108,16 +108,67 @@ function persistHistory(): void {
 loadHistory();
 
 /**
+ * Fast inspection to determine whether an article still requires archive links,
+ * dead link rescue, or citation repairs.
+ *
+ * Checks for:
+ * 1. Obsolete or active {{dead link}} templates.
+ * 2. Corrupted or merged dates (e.g. "2013-05-14 24, 2019").
+ * 3. Citation templates ({{cite web}}, {{cite news}}, etc.) lacking archive-url.
+ * 4. Broken or unarchived references.
+ */
+export function articleNeedsArchival(wikitext: string): boolean {
+  if (!wikitext || typeof wikitext !== "string") return false;
+
+  // 1. Any {{dead link}} or {{deadlink}} template
+  if (/\{\{\s*dead[ _]?link/i.test(wikitext)) {
+    return true;
+  }
+
+  // 2. Corrupted or merged archive dates (e.g. "2013-05-14 24, 2019")
+  if (/\|\s*archive-?date\s*=\s*\d{4}-\d{2}-\d{2}\s+\S+/i.test(wikitext)) {
+    return true;
+  }
+  if (/\|\s*archive-?date\s*=[^|}\n]*\b(19\d\d|20\d\d)\b[^|}\n]*\b(19\d\d|20\d\d)\b/i.test(wikitext)) {
+    return true;
+  }
+
+  // 3. Citation templates with external URLs lacking archive-url
+  const tplRegex = /\{\{\s*([a-zA-Z0-9_ -]+)\s*\|([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}\}/gi;
+  let match: RegExpExecArray | null;
+  while ((match = tplRegex.exec(wikitext)) !== null) {
+    const rawTplName = match[1].trim().toLowerCase().replace(/_/g, " ");
+    if (
+      rawTplName.startsWith("cite ") ||
+      rawTplName === "citation" ||
+      rawTplName === "web reference"
+    ) {
+      const content = match[2];
+      const hasUrl = /\|\s*(?:url|website)\s*=\s*https?:\/\//i.test(content);
+      if (hasUrl) {
+        const hasArchive = /\|\s*(?:archive-?url|archive_url)\s*=\s*https?:\/\//i.test(content);
+        if (!hasArchive) {
+          return true; // Still needs an archive link!
+        }
+      }
+    }
+  }
+
+  return false;
+}
+
+/**
  * Check if an article is eligible for bot inspection.
  *
- * Rule:
- * 1. If never checked before -> ELIGIBLE.
- * 2. If checked before and currentRevid <= lastCheckedRevid -> INELIGIBLE (skip, no changes detected).
- * 3. If checked before but currentRevid > lastCheckedRevid -> ELIGIBLE (article was modified on Justapedia).
+ * Rules:
+ * 1. If an article still needs archive links, dead link fixes, or citation repairs -> ELIGIBLE.
+ * 2. If an article has already been properly fixed (all citations have archive links, zero dead links, zero issues) -> INELIGIBLE (skip, do not touch).
+ * 3. If an article was modified on Justapedia (currentRevid > lastCheckedRevid) -> ELIGIBLE.
  */
 export function isArticleEligibleForCheck(
   title: string,
-  currentRevid?: number
+  currentRevid?: number,
+  wikitext?: string
 ): {
   eligible: boolean;
   reason?: string;
@@ -128,31 +179,47 @@ export function isArticleEligibleForCheck(
   const norm = normalizeTitle(title);
   const entry = historyMap.get(norm);
 
+  // If wikitext is available, inspect whether citations still need archive links or repairs:
+  if (wikitext) {
+    const needsWork = articleNeedsArchival(wikitext);
+    if (needsWork) {
+      return {
+        eligible: true,
+        reason: entry
+          ? "Article was evaluated before, but citations still require archive links or dead link fixes."
+          : "Article has citations requiring archive links or dead link repairs.",
+        previousEntry: entry,
+      };
+    }
+
+    // Article has zero dead links, all citations already have archive-urls, zero corruptions:
+    if (entry) {
+      return {
+        eligible: false,
+        reason: `Article is already properly fixed. All citations have archive links and zero dead links remain.`,
+        previousEntry: entry,
+      };
+    }
+  }
+
   if (!entry) {
     return { eligible: true }; // First time checking this article
   }
 
-  // If currentRevid is provided, compare with last checked revid
+  // If currentRevid is provided and greater than lastCheckedRevid
   if (currentRevid && entry.lastCheckedRevid > 0) {
-    if (currentRevid <= entry.lastCheckedRevid) {
+    if (currentRevid > entry.lastCheckedRevid) {
       return {
-        eligible: false,
-        reason: `Article already evaluated at rev #${entry.lastCheckedRevid} (${entry.status === "verified_healthy" ? "verified clean" : "edited & resolved"}). No subsequent revisions found on Justapedia.`,
+        eligible: true,
+        reason: `Article was modified on Justapedia (current rev #${currentRevid} > previous rev #${entry.lastCheckedRevid}). Re-evaluating.`,
         previousEntry: entry,
       };
     }
-    // Article has a newer revision ID on Justapedia! Re-evaluate it.
-    return {
-      eligible: true,
-      reason: `Article was modified on Justapedia (current rev #${currentRevid} > previous rev #${entry.lastCheckedRevid}). Re-evaluating.`,
-      previousEntry: entry,
-    };
   }
 
-  // If no currentRevid was passed, default to ineligible if already recorded
   return {
-    eligible: false,
-    reason: `Article was already processed on ${entry.lastCheckedTimestamp} by ${entry.resolvedByBot}.`,
+    eligible: true,
+    reason: "Inspecting wikitext to verify citation and archive completeness.",
     previousEntry: entry,
   };
 }

@@ -7,7 +7,12 @@ or as a one-shot CLI tool via stdin/stdout.
 import sys
 import json
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
 from curl_cffi import requests
+
+class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
 
 def handle_request(req_data):
     url = req_data.get("url", "https://justapedia.org/api.php")
@@ -92,7 +97,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         pass  # Quiet logging
 
 def run_server(port=5005):
-    server = HTTPServer(("127.0.0.1", port), BridgeHandler)
+    server = ThreadedHTTPServer(("127.0.0.1", port), BridgeHandler)
     server.serve_forever()
 
 if __name__ == "__main__":

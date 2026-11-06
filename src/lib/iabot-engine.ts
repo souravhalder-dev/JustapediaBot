@@ -180,14 +180,21 @@ export async function processArticleWithIABot(
       }
 
       // ------------------------------------------------------------------------
-      // CASE B: Check original URL health
+      // CASE B: Determine URL health (Fast path: if already tagged {{dead link}}, skip HTTP ping)
       // ------------------------------------------------------------------------
-      const health = await checkUrlHealth(item.url);
+      let isDead = item.hasDeadTag;
+      let isAlive = false;
+
+      if (!isDead) {
+        const health = await checkUrlHealth(item.url);
+        isDead = health.isPermanentDead;
+        isAlive = health.status === "alive";
+      }
 
       // ------------------------------------------------------------------------
-      // CASE C: URL is DEAD (404, 410, DNS fail, Connection refused, or soft 404)
+      // CASE C: URL is DEAD (tagged dead, 404, 410, DNS fail, or soft 404)
       // ------------------------------------------------------------------------
-      if (health.isPermanentDead) {
+      if (isDead) {
         // Search Wayback Machine CDX API for best snapshot (matching citation date if present)
         const targetDate = item.citationDate || item.accessDate;
         const snapshot = await findBestWaybackSnapshot(item.url, targetDate);
@@ -246,8 +253,28 @@ export async function processArticleWithIABot(
       // ------------------------------------------------------------------------
       // CASE D: URL is ALIVE -> Archive Working Links (if enabled)
       // ------------------------------------------------------------------------
-      if (health.status === "alive" && archiveWorkingLinks && !item.hasArchive) {
+      if (isAlive && archiveWorkingLinks && !item.hasArchive) {
         requestWaybackSave(item.url).catch(() => {});
+        const targetDate = item.citationDate || item.accessDate;
+        const snapshot = await findBestWaybackSnapshot(item.url, targetDate);
+        if (snapshot && snapshot.available && item.citationTemplate) {
+          const sampleDate = item.citationTemplate.archiveDate || item.citationTemplate.citationDate || item.citationTemplate.accessDate || targetDate;
+          const archiveDate = formatWaybackDate(snapshot.timestamp, sampleDate);
+          const patched = patchCitationTemplate(
+            item.citationTemplate,
+            snapshot.url,
+            archiveDate,
+            "live"
+          );
+          if (patched !== item.citationTemplate.rawString) {
+            return {
+              target: item.citationTemplate.rawString,
+              replacement: patched,
+              statType: "added",
+              detail: `Archived live reference in {{${item.citationTemplate.templateName}}} on "${item.url}" with Wayback snapshot (${archiveDate})`,
+            };
+          }
+        }
       }
 
       return null;
