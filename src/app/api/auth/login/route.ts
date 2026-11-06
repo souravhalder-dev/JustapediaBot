@@ -18,7 +18,8 @@ export async function POST(req: NextRequest) {
     const result = await loginToJustapedia(username, password);
 
     if (!result.success) {
-      return NextResponse.json(result, { status: 401 });
+      const isForbidden = result.message?.includes("Access Restricted") || result.message?.includes("Bot or Administrator");
+      return NextResponse.json(result, { status: isForbidden ? 403 : 401 });
     }
 
     return NextResponse.json(result);

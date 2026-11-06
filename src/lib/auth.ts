@@ -18,10 +18,72 @@ export interface SessionPayload {
   userid?: number;
   editcount?: number;
   groups?: string[];
+  rights?: string[];
   auth_type: "credentials" | "oauth";
   cookies: Record<string, string>;
   iat?: number;
   exp?: number;
+}
+
+/**
+ * Verify if account holds Bot or Administrator rights on Justapedia.
+ * Restricts login access exclusively to users with Bot or Administrator privileges.
+ */
+export function checkBotOrAdminAccess(groups: string[] = [], rights: string[] = []): {
+  authorized: boolean;
+  isBot: boolean;
+  isAdmin: boolean;
+  roleBadge: string;
+} {
+  const normGroups = groups.map((g) => g.toLowerCase().trim());
+  const normRights = rights.map((r) => r.toLowerCase().trim());
+
+  // Bot check:
+  // - Group is 'bot' or 'copyviobot'
+  // - Right is 'bot'
+  const botGroups = ["bot", "copyviobot"];
+  const isBot =
+    normGroups.some((g) => botGroups.includes(g)) ||
+    normRights.includes("bot");
+
+  // Administrator check:
+  // - Canonical MediaWiki group 'sysop'
+  // - Additional administrative groups: 'interface-admin', 'bureaucrat', 'administrator', 'root', 'communitytrustee', 'executivecommittee'
+  // - Core administrator rights: 'protect', 'editprotected', 'delete', 'bigdelete', 'block', 'editinterface'
+  const adminGroups = [
+    "sysop",
+    "administrator",
+    "interface-admin",
+    "bureaucrat",
+    "root",
+    "communitytrustee",
+    "executivecommittee",
+  ];
+  const adminRights = [
+    "protect",
+    "editprotected",
+    "delete",
+    "bigdelete",
+    "block",
+    "editinterface",
+  ];
+
+  const isAdmin =
+    normGroups.some((g) => adminGroups.includes(g)) ||
+    normRights.some((r) => adminRights.includes(r));
+
+  const authorized = isBot || isAdmin;
+
+  let roleBadge = "Standard User";
+  if (isBot && isAdmin) {
+    roleBadge = "Bot & Administrator";
+  } else if (isBot) {
+    roleBadge = "Bot";
+  } else if (isAdmin) {
+    roleBadge = "Administrator";
+  }
+
+  return { authorized, isBot, isAdmin, roleBadge };
 }
 
 /**
@@ -164,6 +226,7 @@ export async function loginToJustapedia(username: string, password: string): Pro
     let editCount = 0;
     let userId: number | undefined;
     let groups: string[] = [];
+    let rights: string[] = [];
 
     if (userResp.status === 200) {
       const uinfo = userResp.data?.query?.userinfo;
@@ -171,15 +234,26 @@ export async function loginToJustapedia(username: string, password: string): Pro
         userId = uinfo.id;
         editCount = uinfo.editcount || 0;
         groups = uinfo.groups || [];
+        rights = uinfo.rights || [];
       }
     }
 
-    // Step 4: Issue signed stateless JWT session token
+    // Step 4: Restrict login strictly to accounts with Bot or Administrator rights
+    const access = checkBotOrAdminAccess(groups, rights);
+    if (!access.authorized) {
+      return {
+        success: false,
+        message: `Access Restricted: Only Justapedia accounts with Bot or Administrator rights are authorized to log in. Account "@${verifiedUsername}" is not assigned Bot or Administrator privileges.`,
+      };
+    }
+
+    // Step 5: Issue signed stateless JWT session token
     const token = await new SignJWT({
       sub: verifiedUsername,
       userid: userId,
       editcount: editCount,
       groups: groups,
+      rights: rights,
       auth_type: "credentials",
       cookies: accumulatedCookies,
     })
@@ -194,6 +268,10 @@ export async function loginToJustapedia(username: string, password: string): Pro
       userid: userId,
       editcount: editCount,
       groups: groups,
+      rights: rights,
+      is_bot: access.isBot,
+      is_admin: access.isAdmin,
+      role_badge: access.roleBadge,
       auth_type: "credentials",
       userContributionsUrl: `https://justapedia.org/Special:Contributions/${encodeURIComponent(verifiedUsername)}`,
       userProfileUrl: `https://justapedia.org/User:${encodeURIComponent(verifiedUsername)}`,
@@ -201,7 +279,7 @@ export async function loginToJustapedia(username: string, password: string): Pro
 
     return {
       success: true,
-      message: `Successfully logged in as ${verifiedUsername}`,
+      message: `Successfully logged in as ${verifiedUsername} (${access.roleBadge})`,
       session_token: token,
       username: verifiedUsername,
       auth_type: "credentials",
@@ -265,14 +343,28 @@ export async function verifyUserSession(sessionToken: string): Promise<{ valid: 
     }
 
     const liveUsername = uinfo.name;
+    const groups = uinfo.groups || [];
+    const rights = uinfo.rights || [];
+
+    // Verify user still possesses Bot or Administrator rights
+    const access = checkBotOrAdminAccess(groups, rights);
+    if (!access.authorized) {
+      return {
+        valid: false,
+        error: `Access Revoked: Account "@${liveUsername}" lacks Bot or Administrator privileges on Justapedia.`,
+      };
+    }
 
     const user: AuthUser = {
       logged_in: true,
       username: liveUsername,
       userid: uinfo.id,
       editcount: uinfo.editcount || 0,
-      groups: uinfo.groups || [],
-      rights: uinfo.rights || [],
+      groups: groups,
+      rights: rights,
+      is_bot: access.isBot,
+      is_admin: access.isAdmin,
+      role_badge: access.roleBadge,
       auth_type: session.auth_type,
       userContributionsUrl: `https://justapedia.org/Special:Contributions/${encodeURIComponent(liveUsername)}`,
       userProfileUrl: `https://justapedia.org/User:${encodeURIComponent(liveUsername)}`,

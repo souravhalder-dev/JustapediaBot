@@ -81,6 +81,9 @@ export interface AuthUser {
   editcount?: number;
   groups?: string[];
   rights?: string[];
+  is_bot?: boolean;
+  is_admin?: boolean;
+  role_badge?: string;
   auth_type?: 'credentials' | 'oauth';
   userContributionsUrl?: string;
   userProfileUrl?: string;

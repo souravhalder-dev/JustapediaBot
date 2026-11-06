@@ -84,9 +84,16 @@ export function AuthModal() {
               <div className="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-300 flex items-start gap-3">
                 <CheckCircle2 className="w-5 h-5 flex-shrink-0 mt-0.5" />
                 <div className="space-y-1">
-                  <p className="text-sm font-semibold text-white">
-                    Logged in as <span className="text-emerald-400 font-mono">@{user.username}</span>
-                  </p>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <p className="text-sm font-semibold text-white">
+                      Logged in as <span className="text-emerald-400 font-mono">@{user.username}</span>
+                    </p>
+                    {user.role_badge && (
+                      <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                        {user.role_badge}
+                      </span>
+                    )}
+                  </div>
                   <p className="text-xs text-slate-400 leading-relaxed">
                     All bot edits will be saved under your account and recorded directly in your Justapedia contribution history.
                   </p>
@@ -137,6 +144,16 @@ export function AuthModal() {
                 </p>
                 <p className="text-slate-400 text-[11px] leading-relaxed">
                   Edits are committed via <code className="text-indigo-300">justapedia.org/api.php</code> strictly under your account session cookies. Your contributions will appear on <code className="text-slate-300">Special:Contributions</code>.
+                </p>
+              </div>
+
+              <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-xs text-amber-300 space-y-1">
+                <p className="font-semibold flex items-center gap-1.5 text-amber-200">
+                  <ShieldCheck className="w-3.5 h-3.5 text-amber-400" />
+                  Restricted Access: Bot & Admin Only
+                </p>
+                <p className="text-slate-400 text-[11px] leading-relaxed">
+                  Only accounts with <strong className="text-amber-200">Bot</strong> or <strong className="text-amber-200">Administrator</strong> privileges on Justapedia are authorized to log in.
                 </p>
               </div>
 
