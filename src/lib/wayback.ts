@@ -331,11 +331,16 @@ export async function findBestWaybackSnapshot(
 ): Promise<WaybackSnapshot | null> {
   const normTargetTimestamp = preferredDate ? normalizeTimestamp(preferredDate) : "";
 
-  // 1. Try CDX query first if a date preference exists
+  // 1. Fast Availability API query with timestamp (~200ms)
+  const fastSnapshot = await checkWaybackAvailability(url, normTargetTimestamp || undefined);
+  if (fastSnapshot && fastSnapshot.available) {
+    return fastSnapshot;
+  }
+
+  // 2. Fallback to CDX query if availability returned no snapshot
   if (normTargetTimestamp) {
-    const cdxRecords = await searchWaybackCDX(url, { limit: 20 });
+    const cdxRecords = await searchWaybackCDX(url, { limit: 10 });
     if (cdxRecords.length > 0) {
-      // Find record with minimum absolute difference from target timestamp
       const targetNum = parseInt(normTargetTimestamp.substring(0, 8), 10);
       let bestRecord = cdxRecords[0];
       let smallestDiff = Infinity;
@@ -360,12 +365,6 @@ export async function findBestWaybackSnapshot(
         };
       }
     }
-  }
-
-  // 2. Query availability API with target date or latest
-  const fastSnapshot = await checkWaybackAvailability(url, normTargetTimestamp || undefined);
-  if (fastSnapshot && fastSnapshot.available) {
-    return fastSnapshot;
   }
 
   // 3. Fallback CDX search without date filter

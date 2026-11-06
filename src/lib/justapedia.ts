@@ -202,3 +202,49 @@ export async function fetchCategoryMembers(
     return { members: [] };
   }
 }
+
+/**
+ * Fetch articles embedding/transcluding a Justapedia template (e.g. Template:Dead link)
+ */
+export async function fetchTemplateTransclusions(
+  templateTitle: string = "Template:Dead link",
+  limit: number = 50,
+  eicontinue?: string
+): Promise<{ members: string[]; eicontinue?: string }> {
+  let tpl = templateTitle.trim();
+  if (!tpl.toLowerCase().startsWith("template:")) {
+    tpl = `Template:${tpl}`;
+  }
+
+  const params = new URLSearchParams({
+    action: "query",
+    list: "embeddedin",
+    eititle: tpl,
+    eilimit: String(Math.min(limit, 100)),
+    einamespace: "0", // Main article namespace only
+    format: "json",
+  });
+
+  if (eicontinue) {
+    params.append("eicontinue", eicontinue);
+  }
+
+  try {
+    const response = await fetch(`${JUSTAPEDIA_API}?${params.toString()}`, {
+      headers: DEFAULT_HEADERS,
+      cache: "no-store",
+    });
+
+    if (response.ok) {
+      const data = await response.json();
+      const list = data?.query?.embeddedin || [];
+      return {
+        members: list.map((m: any) => m.title as string),
+        eicontinue: data?.continue?.eicontinue,
+      };
+    }
+  } catch (err) {
+    console.error("[TEMPLATE TRANSCLUSIONS ERROR]", err);
+  }
+  return { members: [] };
+}

@@ -1,6 +1,6 @@
 import fs from "fs";
 import path from "path";
-import { fetchJustapediaPage, fetchCategoryMembers } from "./justapedia";
+import { fetchJustapediaPage, fetchCategoryMembers, fetchTemplateTransclusions } from "./justapedia";
 import { processArticleWithIABot, IABotRunOptions, IABotStats } from "./iabot-engine";
 import { executeJustapediaEdit } from "./save-engine";
 import { isArticleEligibleForCheck, recordArticleCheck } from "./article-history";
@@ -66,16 +66,16 @@ function createDefaultState(): BotRunnerState {
     totalSkipped: 0,
     totalErrors: 0,
     queue: [
-      "Nikola Tesla",
-      "Grace Hopper",
-      "Rosalind Franklin",
-      "Alan Turing",
-      "Ada Lovelace",
-      "Tim Berners-Lee",
+      "Academy Awards",
+      "Andre Agassi",
+      "Andorra",
+      "Animal Farm",
+      "Amphibian",
+      "Astronaut",
+      "Atlantic Ocean",
+      "Angola",
       "James Webb Space Telescope",
       "Hubble Space Telescope",
-      "Apollo 11",
-      "Voyager 1",
     ],
     activeArticle: null,
     activePhase: "Idle",
@@ -187,7 +187,7 @@ class ServerBotRunner {
   }
 
   private async interruptibleSleep(ms: number): Promise<void> {
-    const interval = 50;
+    const interval = 25;
     const steps = Math.ceil(ms / interval);
     for (let i = 0; i < steps; i++) {
       if (this.stopRequested || this.state.status === "STOPPED") break;
@@ -219,7 +219,7 @@ class ServerBotRunner {
 
     this.addLog({
       level: "info",
-      message: `[STARTED] InternetArchiveBot activated by @${params.operatorUsername}. Fast autonomous processing engaged.`,
+      message: `[STARTED] InternetArchiveBot activated by @${params.operatorUsername}. High-speed 100 edits/min worker pool engaged.`,
     });
 
     this.persistState();
@@ -258,16 +258,33 @@ class ServerBotRunner {
   }
 
   /**
-   * Trigger queue replenishment from Justapedia category crawling
+   * Trigger queue replenishment from Justapedia category crawling or template transclusions
    */
-  public async replenishQueue(limit: number = 50, customCat?: string): Promise<number> {
+  public async replenishQueue(limit: number = 50, customSource?: string): Promise<number> {
     if (this.isReplenishing) return 0;
     this.isReplenishing = true;
 
     try {
-      const cat = customCat || this.state.options.categoryInput || "Category:All articles with dead external links";
-      const res = await fetchCategoryMembers(cat, limit);
-      const members = res.members || [];
+      const source =
+        customSource ||
+        this.state.options.categoryInput ||
+        "Category:All articles with dead external links";
+
+      let members: string[] = [];
+
+      if (source.toLowerCase().startsWith("template:")) {
+        const res = await fetchTemplateTransclusions(source, limit);
+        members = res.members || [];
+      } else {
+        const res = await fetchCategoryMembers(source, limit);
+        members = res.members || [];
+      }
+
+      // If category members was small, supplement with active Template:Dead link articles on Justapedia
+      if (members.length < 15 && !source.toLowerCase().startsWith("template:")) {
+        const tplRes = await fetchTemplateTransclusions("Template:Dead link", limit);
+        members = [...members, ...(tplRes.members || [])];
+      }
 
       let added = 0;
       for (const m of members) {
@@ -280,7 +297,7 @@ class ServerBotRunner {
       if (added > 0) {
         this.addLog({
           level: "info",
-          message: `[QUEUE REPLENISHED] Added ${added} new unhandled article(s) from "${cat}". Queue depth: ${this.state.queue.length}.`,
+          message: `[QUEUE REPLENISHED] Added ${added} new unhandled article(s) from "${source}". Queue depth: ${this.state.queue.length}.`,
         });
       }
 
@@ -297,7 +314,6 @@ class ServerBotRunner {
   public addArticle(title: string): boolean {
     const clean = title.trim();
     if (!clean) return false;
-    // Add to front of queue
     this.state.queue.unshift(clean);
     this.addLog({
       level: "info",
@@ -370,17 +386,222 @@ class ServerBotRunner {
   }
 
   /**
-   * Main Background Worker Loop:
+   * Process a single article systematically:
+   * 1. Check revision ID against persistent history (duplicate shield).
+   * 2. Inspect all references in a single pass.
+   * 3. If zero issues -> do NOT edit, mark verified clean.
+   * 4. If issues found -> commit edit under authenticated user, increment cycle edits.
+   * 5. If edit fails -> do NOT increment successful edits count.
+   */
+  private async processSingleArticle(articleTitle: string): Promise<boolean> {
+    if (this.stopRequested || this.state.status !== "RUNNING") return false;
+
+    // 1. Fetch Page
+    let page;
+    try {
+      page = await fetchJustapediaPage(articleTitle);
+    } catch (fetchErr: any) {
+      this.addLog({
+        level: "warn",
+        articleTitle,
+        message: `Could not retrieve "${articleTitle}" from Justapedia API: ${fetchErr.message}`,
+      });
+      return false;
+    }
+
+    if (!page || !page.exists || !page.wikitext.trim()) {
+      return false;
+    }
+
+    const currentRevid = page.revisionId || 0;
+    const eligibility = isArticleEligibleForCheck(articleTitle, currentRevid);
+
+    // 2. Duplicate Check Shield: if revid <= lastCheckedRevid, skip immediately
+    if (!eligibility.eligible) {
+      this.state.totalSkipped += 1;
+      this.addLog({
+        level: "info",
+        articleTitle,
+        message: `[DUPLICATE SHIELD] "${articleTitle}" (rev #${currentRevid}): ${eligibility.reason}`,
+      });
+      return false;
+    }
+
+    if (this.stopRequested || this.state.status !== "RUNNING") return false;
+
+    // 3. Process article citations with IABot engine
+    this.state.activeArticle = articleTitle;
+    this.state.activePhase = "Inspecting citations";
+
+    let botResult;
+    try {
+      botResult = await processArticleWithIABot(articleTitle, {
+        archiveWorkingLinks: this.state.options.archiveWorkingLinks,
+        repairBrokenArchives: this.state.options.repairBrokenArchives,
+        tagUnrecoverableDead: this.state.options.tagUnrecoverableDead,
+        maxLinksPerPage: this.state.options.maxLinksPerPage,
+        useSandbox: this.state.options.useSandbox,
+      });
+    } catch (procErr: any) {
+      this.state.totalErrors += 1;
+      this.state.detailedStats.failedOperations += 1;
+      this.addLog({
+        level: "error",
+        articleTitle,
+        message: `Processing error on "${articleTitle}": ${procErr.message || String(procErr)}`,
+      });
+      return false;
+    }
+
+    if (this.stopRequested || this.state.status !== "RUNNING") return false;
+
+    // CASE A: No issues identified (article is clean/healthy)
+    // Rule: DO NOT EDIT. Mark verified clean and do not touch.
+    if (!botResult.modified || !botResult.fixedWikitext) {
+      recordArticleCheck({
+        title: articleTitle,
+        revid: currentRevid,
+        botId: this.state.botId,
+        status: "verified_healthy",
+        issuesFound: 0,
+        issuesFixed: 0,
+        summary: botResult.details.join(" • ") || "Verified clean citations. Zero dead links.",
+      });
+
+      this.state.totalChecked += 1;
+      this.state.detailedStats.articlesProcessed += 1;
+      this.state.detailedStats.referencesChecked += botResult.stats.referencesChecked;
+
+      this.addLog({
+        level: "info",
+        articleTitle,
+        message: `[VERIFIED HEALTHY] "${articleTitle}" (${botResult.stats.referencesChecked} refs inspected). Zero issues found. Skipped without modifying.`,
+      });
+
+      return false;
+    }
+
+    // CASE B: Issues found and repaired! Save the REAL fixed wikitext.
+    if (!this.state.sessionToken) {
+      this.addLog({
+        level: "error",
+        articleTitle,
+        message: `Authentication required: Cannot save edits to "${articleTitle}". Operator session missing.`,
+      });
+      this.state.status = "STOPPED";
+      return false;
+    }
+
+    this.state.activePhase = "Saving to Justapedia";
+
+    const editSummary =
+      botResult.summary ||
+      `InternetArchiveBot: Rescued references & verified citations (${this.state.operatorUsername})`;
+
+    let saveRes;
+    try {
+      saveRes = await executeJustapediaEdit(this.state.sessionToken, {
+        title: articleTitle,
+        wikitext: botResult.fixedWikitext,
+        summary: editSummary,
+        use_sandbox: this.state.options.useSandbox,
+        sandbox_title:
+          this.state.options.useSandbox && this.state.operatorUsername
+            ? `User:${this.state.operatorUsername}/sandbox`
+            : undefined,
+        is_minor: false,
+        is_bot: false,
+      });
+    } catch (saveErr: any) {
+      this.state.totalErrors += 1;
+      this.state.detailedStats.failedOperations += 1;
+      this.addLog({
+        level: "error",
+        articleTitle,
+        message: `Save exception on "${articleTitle}": ${saveErr.message || String(saveErr)}`,
+      });
+      return false;
+    }
+
+    // Rule: Do not count failed edits as successful edits.
+    if (!saveRes.success) {
+      this.state.totalErrors += 1;
+      this.state.detailedStats.failedOperations += 1;
+      this.addLog({
+        level: "error",
+        articleTitle,
+        message: `Failed to save "${articleTitle}": ${saveRes.message}`,
+      });
+
+      if (saveRes.message?.includes("Authentication") || saveRes.message?.includes("expired")) {
+        this.state.status = "STOPPED";
+        this.addLog({
+          level: "error",
+          message: `[SESSION EXPIRED] Operator login credentials have expired. Bot halted. Please re-login.`,
+        });
+      }
+      return false;
+    }
+
+    // Record successful resolution in history
+    const newRevid = saveRes.revid || currentRevid;
+    const totalFixed =
+      botResult.stats.archiveLinksAdded +
+      botResult.stats.archiveLinksRepaired +
+      botResult.stats.unrecoverableLinksTagged;
+
+    recordArticleCheck({
+      title: articleTitle,
+      revid: currentRevid,
+      botId: this.state.botId,
+      status: "edited_and_resolved",
+      issuesFound: totalFixed,
+      issuesFixed: totalFixed,
+      revidSaved: newRevid,
+      diffUrl: saveRes.diff_url,
+      summary: editSummary,
+    });
+
+    // Only count as successful edit if saveRes.success === true
+    this.state.totalChecked += 1;
+    this.state.totalEdits += 1;
+    this.state.currentCycleEdits += 1;
+    this.state.detailedStats.articlesProcessed += 1;
+    this.state.detailedStats.articlesModified += 1;
+    this.state.detailedStats.referencesChecked += botResult.stats.referencesChecked;
+    this.state.detailedStats.deadLinksDetected += botResult.stats.deadLinksDetected;
+    this.state.detailedStats.archiveLinksAdded += botResult.stats.archiveLinksAdded;
+    this.state.detailedStats.archiveLinksRepaired += botResult.stats.archiveLinksRepaired;
+    this.state.detailedStats.newSnapshotsRequested += botResult.stats.newSnapshotsRequested;
+    this.state.detailedStats.unrecoverableLinksTagged += botResult.stats.unrecoverableLinksTagged;
+
+    this.addLog({
+      level: "success",
+      articleTitle,
+      message: `[EDIT #${this.state.currentCycleEdits}/100 SAVED] "${articleTitle}" updated on Justapedia (rev #${newRevid}). Added ${botResult.stats.archiveLinksAdded} archive(s), repaired ${botResult.stats.archiveLinksRepaired} link(s).`,
+      diffUrl: saveRes.diff_url,
+    });
+
+    this.persistState();
+    return true;
+  }
+
+  /**
+   * Main High-Performance Autonomous Worker Pool:
    * Handles:
-   * 1. Check once per article, resolve all issues in a single edit
-   * 2. Skip unchanged articles unless revid changed on Justapedia
-   * 3. 100 successful edits -> exactly 60s pause -> auto-resume cycle
-   * 4. Instant cancellation on Stop
+   * 1. Up to 6 concurrent article workers for rapid edit throughput (up to 100 edits/min).
+   * 2. Exactly 100 successful edits -> mandatory 60s rest break -> auto-resume Cycle #(N+1).
+   * 3. Immediate cancellation on Stop.
+   * 4. Zero duplicate edits, zero unnecessary edits.
    */
   private async startLoop(): Promise<void> {
     if (this.isLoopRunning) return;
     this.isLoopRunning = true;
     this.stopRequested = false;
+
+    const CONCURRENCY = 6;
+    const activeWorkers = new Set<Promise<void>>();
+    const inProgressArticles = new Set<string>();
 
     try {
       while (!this.stopRequested && this.state.status !== "STOPPED") {
@@ -391,8 +612,8 @@ class ServerBotRunner {
         // -------------------------------------------------------------
         if (this.state.pauseUntil && now < this.state.pauseUntil) {
           this.state.activeArticle = null;
-          this.state.activePhase = "Rest Break";
-          await this.interruptibleSleep(500);
+          this.state.activePhase = "Rest Break (60s)";
+          await this.interruptibleSleep(200);
           continue;
         }
 
@@ -414,273 +635,83 @@ class ServerBotRunner {
         if (this.stopRequested || this.state.status !== "RUNNING") break;
 
         // -------------------------------------------------------------
-        // 2. QUEUE HEALTH & AUTO-REPLENISHMENT
-        // -------------------------------------------------------------
-        if (this.state.queue.length <= 5 && !this.isReplenishing) {
-          await this.replenishQueue(50);
-        }
-
-        if (this.state.queue.length === 0) {
-          this.state.activeArticle = null;
-          this.state.activePhase = "Awaiting articles";
-          this.addLog({
-            level: "info",
-            message: `[QUEUE IDLE] Awaiting next articles from category members...`,
-          });
-          await this.interruptibleSleep(2000);
-          continue;
-        }
-
-        // Pop next article from queue
-        const articleTitle = this.state.queue.shift()!;
-        this.state.activeArticle = articleTitle;
-        this.state.activePhase = "Inspecting citations";
-        this.addLog({
-          level: "info",
-          articleTitle,
-          message: `[PROCESSING] Inspecting "${articleTitle}" for broken archives and dead links...`,
-        });
-        this.persistState();
-
-        if (this.stopRequested) break;
-
-        // -------------------------------------------------------------
-        // 3. FETCH & DUPLICATE MODIFICATION SHIELD
-        // -------------------------------------------------------------
-        let page;
-        try {
-          page = await fetchJustapediaPage(articleTitle);
-        } catch (fetchErr: any) {
-          this.addLog({
-            level: "warn",
-            articleTitle,
-            message: `Could not retrieve "${articleTitle}" from Justapedia API: ${fetchErr.message}`,
-          });
-          this.state.activeArticle = null;
-          this.state.activePhase = "Idle";
-          continue;
-        }
-
-        if (!page || !page.exists || !page.wikitext.trim()) {
-          this.addLog({
-            level: "warn",
-            articleTitle,
-            message: `Article "${articleTitle}" does not exist or has empty wikitext on Justapedia. Skipped.`,
-          });
-          this.state.activeArticle = null;
-          this.state.activePhase = "Idle";
-          continue;
-        }
-
-        const currentRevid = page.revisionId || 0;
-        const eligibility = isArticleEligibleForCheck(articleTitle, currentRevid);
-
-        // If article was already checked at this exact revision, skip immediately!
-        if (!eligibility.eligible) {
-          this.state.totalSkipped += 1;
-          this.addLog({
-            level: "info",
-            articleTitle,
-            message: `[DUPLICATE SHIELD] "${articleTitle}" (rev #${currentRevid}): ${eligibility.reason}`,
-          });
-          this.state.activeArticle = null;
-          this.state.activePhase = "Idle";
-          this.persistState();
-          await this.interruptibleSleep(100);
-          continue;
-        }
-
-        // -------------------------------------------------------------
-        // 4. INSPECT & RESOLVE ALL ISSUES IN SINGLE CYCLE
-        // -------------------------------------------------------------
-        let botResult;
-        try {
-          botResult = await processArticleWithIABot(articleTitle, {
-            archiveWorkingLinks: this.state.options.archiveWorkingLinks,
-            repairBrokenArchives: this.state.options.repairBrokenArchives,
-            tagUnrecoverableDead: this.state.options.tagUnrecoverableDead,
-            maxLinksPerPage: this.state.options.maxLinksPerPage,
-            useSandbox: this.state.options.useSandbox,
-          });
-        } catch (procErr: any) {
-          this.state.totalErrors += 1;
-          this.state.detailedStats.failedOperations += 1;
-          this.addLog({
-            level: "error",
-            articleTitle,
-            message: `Processing error on "${articleTitle}": ${procErr.message || String(procErr)}`,
-          });
-          this.state.activeArticle = null;
-          this.state.activePhase = "Idle";
-          continue;
-        }
-
-        if (this.stopRequested) break;
-
-        // CASE A: No issues identified (article is clean/healthy)
-        // Rule: DO NOT EDIT. Mark verified clean and do not touch.
-        if (!botResult.modified || !botResult.fixedWikitext) {
-          recordArticleCheck({
-            title: articleTitle,
-            revid: currentRevid,
-            botId: this.state.botId,
-            status: "verified_healthy",
-            issuesFound: 0,
-            issuesFixed: 0,
-            summary: botResult.details.join(" • ") || "Verified clean citations. Zero dead links.",
-          });
-
-          this.state.totalChecked += 1;
-          this.state.detailedStats.articlesProcessed += 1;
-          this.state.detailedStats.referencesChecked += botResult.stats.referencesChecked;
-
-          this.addLog({
-            level: "info",
-            articleTitle,
-            message: `[VERIFIED HEALTHY] "${articleTitle}" (${botResult.stats.referencesChecked} refs inspected). Zero issues found. Skipped without modifying.`,
-          });
-
-          this.state.activeArticle = null;
-          this.state.activePhase = "Idle";
-          this.persistState();
-          await this.interruptibleSleep(100);
-          continue;
-        }
-
-        // CASE B: Issues found and repaired! Save the REAL fixed wikitext.
-        if (!this.state.sessionToken) {
-          this.addLog({
-            level: "error",
-            articleTitle,
-            message: `Authentication required: Cannot save edits to "${articleTitle}". Operator session missing.`,
-          });
-          this.state.status = "STOPPED";
-          this.state.activeArticle = null;
-          this.state.activePhase = "Stopped";
-          break;
-        }
-
-        this.state.activePhase = "Saving to Justapedia";
-        this.persistState();
-
-        const editSummary =
-          botResult.summary ||
-          `InternetArchiveBot: Rescued references & verified citations (${this.state.operatorUsername})`;
-
-        let saveRes;
-        try {
-          saveRes = await executeJustapediaEdit(this.state.sessionToken, {
-            title: articleTitle,
-            wikitext: botResult.fixedWikitext,
-            summary: editSummary,
-            use_sandbox: this.state.options.useSandbox,
-            sandbox_title:
-              this.state.options.useSandbox && this.state.operatorUsername
-                ? `User:${this.state.operatorUsername}/sandbox`
-                : undefined,
-            is_minor: false,
-            is_bot: false,
-          });
-        } catch (saveErr: any) {
-          this.state.totalErrors += 1;
-          this.state.detailedStats.failedOperations += 1;
-          this.addLog({
-            level: "error",
-            articleTitle,
-            message: `Save exception on "${articleTitle}": ${saveErr.message || String(saveErr)}`,
-          });
-          this.state.activeArticle = null;
-          this.state.activePhase = "Idle";
-          continue;
-        }
-
-        if (!saveRes.success) {
-          this.state.totalErrors += 1;
-          this.state.detailedStats.failedOperations += 1;
-          this.addLog({
-            level: "error",
-            articleTitle,
-            message: `Failed to save "${articleTitle}": ${saveRes.message}`,
-          });
-
-          if (saveRes.message?.includes("Authentication") || saveRes.message?.includes("expired")) {
-            this.state.status = "STOPPED";
-            this.state.activeArticle = null;
-            this.state.activePhase = "Stopped";
-            this.addLog({
-              level: "error",
-              message: `[SESSION EXPIRED] Operator login credentials have expired. Bot halted. Please re-login.`,
-            });
-            break;
-          }
-          this.state.activeArticle = null;
-          this.state.activePhase = "Idle";
-          continue;
-        }
-
-        // Record successful resolution in history
-        const newRevid = saveRes.revid || currentRevid;
-        const totalFixed =
-          botResult.stats.archiveLinksAdded +
-          botResult.stats.archiveLinksRepaired +
-          botResult.stats.unrecoverableLinksTagged;
-
-        recordArticleCheck({
-          title: articleTitle,
-          revid: currentRevid,
-          botId: this.state.botId,
-          status: "edited_and_resolved",
-          issuesFound: totalFixed,
-          issuesFixed: totalFixed,
-          revidSaved: newRevid,
-          diffUrl: saveRes.diff_url,
-          summary: editSummary,
-        });
-
-        this.state.totalChecked += 1;
-        this.state.totalEdits += 1;
-        this.state.currentCycleEdits += 1;
-        this.state.detailedStats.articlesProcessed += 1;
-        this.state.detailedStats.articlesModified += 1;
-        this.state.detailedStats.referencesChecked += botResult.stats.referencesChecked;
-        this.state.detailedStats.deadLinksDetected += botResult.stats.deadLinksDetected;
-        this.state.detailedStats.archiveLinksAdded += botResult.stats.archiveLinksAdded;
-        this.state.detailedStats.archiveLinksRepaired += botResult.stats.archiveLinksRepaired;
-        this.state.detailedStats.newSnapshotsRequested += botResult.stats.newSnapshotsRequested;
-        this.state.detailedStats.unrecoverableLinksTagged += botResult.stats.unrecoverableLinksTagged;
-
-        this.addLog({
-          level: "success",
-          articleTitle,
-          message: `[EDIT #${this.state.currentCycleEdits}/100 SAVED] "${articleTitle}" updated on Justapedia (rev #${newRevid}). Added ${botResult.stats.archiveLinksAdded} archive(s), repaired ${botResult.stats.archiveLinksRepaired} link(s).`,
-          diffUrl: saveRes.diff_url,
-        });
-
-        this.state.activeArticle = null;
-        this.state.activePhase = "Idle";
-        this.persistState();
-
-        // -------------------------------------------------------------
-        // 5. 100-EDIT BURST CHECK & AUTOMATIC 60S PAUSE
+        // 2. BURST LIMIT CHECK (100 successful edits -> enter 60s pause)
         // -------------------------------------------------------------
         if (this.state.currentCycleEdits >= 100) {
           this.state.status = "PAUSED";
-          this.state.pauseUntil = Date.now() + 60000; // Exactly 60 seconds
+          this.state.pauseUntil = Date.now() + 60000; // exactly 60 seconds
           this.state.activeArticle = null;
-          this.state.activePhase = "60s Break";
+          this.state.activePhase = "60s Rest Break";
 
           this.addLog({
             level: "cycle",
             message: `[BURST LIMIT REACHED] Completed 100 successful edits in Cycle #${this.state.cycleNumber}! Entering mandatory 60-second pause. Editing will automatically resume after the break.`,
           });
-
           this.persistState();
+
+          // Wait for any remaining in-flight tasks to finish
+          await Promise.all(activeWorkers);
           continue;
         }
 
-        // Pacing delay (100ms) between article operations for maximum bot speed
-        await this.interruptibleSleep(100);
+        // -------------------------------------------------------------
+        // 3. QUEUE REPLENISHMENT
+        // -------------------------------------------------------------
+        if (this.state.queue.length <= 15 && !this.isReplenishing) {
+          this.replenishQueue(50);
+        }
+
+        if (this.state.queue.length === 0) {
+          if (activeWorkers.size > 0) {
+            await Promise.race(activeWorkers);
+            continue;
+          }
+          this.state.activeArticle = null;
+          this.state.activePhase = "Awaiting articles";
+          await this.replenishQueue(50);
+          if (this.state.queue.length === 0) {
+            await this.interruptibleSleep(1200);
+            continue;
+          }
+        }
+
+        // -------------------------------------------------------------
+        // 4. CONCURRENCY THROTTLE
+        // -------------------------------------------------------------
+        if (activeWorkers.size >= CONCURRENCY) {
+          await Promise.race(activeWorkers);
+          continue;
+        }
+
+        // -------------------------------------------------------------
+        // 5. DISPATCH NEXT ARTICLE
+        // -------------------------------------------------------------
+        const nextTitle = this.state.queue.shift();
+        if (!nextTitle) continue;
+        if (inProgressArticles.has(nextTitle)) continue;
+
+        inProgressArticles.add(nextTitle);
+        this.persistState();
+
+        const workerPromise = (async () => {
+          try {
+            await this.processSingleArticle(nextTitle);
+          } finally {
+            inProgressArticles.delete(nextTitle);
+          }
+        })();
+
+        activeWorkers.add(workerPromise);
+        workerPromise.finally(() => {
+          activeWorkers.delete(workerPromise);
+        });
+
+        // Yield slightly so loop doesn't block the Node event loop
+        await this.interruptibleSleep(20);
       }
+
+      // Wait for all in-flight workers to gracefully resolve
+      await Promise.all(activeWorkers);
     } finally {
       this.isLoopRunning = false;
       this.state.activeArticle = null;

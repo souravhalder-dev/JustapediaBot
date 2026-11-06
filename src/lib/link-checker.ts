@@ -62,11 +62,25 @@ function isSoft404Redirect(initialUrl: string, finalUrl?: string): boolean {
  */
 export async function checkUrlHealth(
   url: string,
-  timeoutMs: number = 2500,
+  timeoutMs: number = 1500,
   maxRetries: number = 0
 ): Promise<LinkCheckOutcome> {
   const cached = urlCheckCache.get(url);
   if (cached) return cached;
+
+  // Archive URLs are already archives, return alive immediately
+  if (url.includes("web.archive.org") || url.includes("archive.today") || url.includes("archive.is") || url.includes("webcitation.org")) {
+    const outcome: LinkCheckOutcome = {
+      url,
+      status: "alive",
+      httpCode: 200,
+      latencyMs: 1,
+      isPermanentDead: false,
+      isTemporaryError: false,
+    };
+    urlCheckCache.set(url, outcome);
+    return outcome;
+  }
 
   const startTime = Date.now();
   let attempt = 0;
